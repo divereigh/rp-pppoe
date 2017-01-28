@@ -24,6 +24,7 @@ typedef struct InterfaceStruct {
     int sessionSock;		/* Socket for session frames */
     int clientOK;		/* Client requests allowed (PADI, PADR) */
     int acOK;			/* AC replies allowed (PADO, PADS) */
+    int sessionCount;		/* Number active sessions on interface */
     unsigned char mac[ETH_ALEN]; /* MAC address */
 } PPPoEInterface;
 
@@ -90,6 +91,8 @@ void relaySendError(unsigned char code,
 
 void alarmHandler(int sig);
 void cleanSessions(void);
+int incrSessionCount(PPPoEInterface const *iface);
+int decrSessionCount(PPPoEInterface const *iface);
 
 #define MAX_INTERFACES 8
 #define DEFAULT_SESSIONS 5000

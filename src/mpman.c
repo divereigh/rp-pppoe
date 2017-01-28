@@ -396,6 +396,12 @@ addInterface(char const *ifname,
     i->sessionSock   = openInterface(ifname, Eth_PPPOE_Session,   NULL, NULL);
     i->clientOK = clientOK;
     i->acOK = acOK;
+    i->sessionCount = 0;
+    fprintf(stderr, "Interface added: name=%s, ac=%d, client=%d, mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
+	   i->name, i->acOK, i->clientOK,
+	   i->mac[0], i->mac[1],
+	   i->mac[2], i->mac[3],
+	   i->mac[4], i->mac[5]);
 }
 
 /**********************************************************************
@@ -516,6 +522,8 @@ createSession(PPPoEInterface const *ac,
 
     acHash->interface = ac;
     cliHash->interface = cli;
+    incrSessionCount(ac);
+    incrSessionCount(cli);
 
     memcpy(acHash->peerMac, acMac, ETH_ALEN);
     acHash->sesNum = acSes;
@@ -589,6 +597,8 @@ freeSession(PPPoESession *ses, char const *msg)
 
     unhash(ses->acHash);
     unhash(ses->clientHash);
+    decrSessionCount(ses->acHash->interface);
+    decrSessionCount(ses->clientHash->interface);
     NumSessions--;
 }
 
@@ -843,18 +853,23 @@ relayGotDiscoveryPacket(PPPoEInterface const *iface)
 
     switch(packet.code) {
     case CODE_PADT:
+	fprintf(stderr, "Got PADT packet via %s\n", iface->name);
 	relayHandlePADT(iface, &packet, size);
 	break;
     case CODE_PADI:
+	fprintf(stderr, "Got PADI packet via %s\n", iface->name);
 	relayHandlePADI(iface, &packet, size);
 	break;
     case CODE_PADO:
+	fprintf(stderr, "Got PADO packet via %s\n", iface->name);
 	relayHandlePADO(iface, &packet, size);
 	break;
     case CODE_PADR:
+	fprintf(stderr, "Got PADR packet via %s\n", iface->name);
 	relayHandlePADR(iface, &packet, size);
 	break;
     case CODE_PADS:
+	fprintf(stderr, "Got PADS packet via %s\n", iface->name);
 	relayHandlePADS(iface, &packet, size);
 	break;
     default:
@@ -927,7 +942,7 @@ relayGotSessionPacket(PPPoEInterface const *iface)
     packet.session = sh->sesNum;
     memcpy(packet.ethHdr.h_source, sh->interface->mac, ETH_ALEN);
     memcpy(packet.ethHdr.h_dest, sh->peerMac, ETH_ALEN);
-#if 0
+// #if 0
     fprintf(stderr, "Relaying %02x:%02x:%02x:%02x:%02x:%02x(%s:%d) to %02x:%02x:%02x:%02x:%02x:%02x(%s:%d)\n",
 	    sh->peer->peerMac[0], sh->peer->peerMac[1], sh->peer->peerMac[2],
 	    sh->peer->peerMac[3], sh->peer->peerMac[4], sh->peer->peerMac[5],
@@ -935,7 +950,10 @@ relayGotSessionPacket(PPPoEInterface const *iface)
 	    sh->peerMac[0], sh->peerMac[1], sh->peerMac[2],
 	    sh->peerMac[3], sh->peerMac[4], sh->peerMac[5],
 	    sh->interface->name, ntohs(sh->sesNum));
-#endif
+
+    fprintf(stderr, "PPP type: 0x%04x\n", ntohs(* (u_int16_t *) packet.payload));
+
+// #endif
     sendPacket(NULL, sh->interface->sessionSock, &packet, size);
 }
 
@@ -972,6 +990,7 @@ relayHandlePADT(PPPoEInterface const *iface,
     packet->session = sh->sesNum;
     memcpy(packet->ethHdr.h_source, sh->interface->mac, ETH_ALEN);
     memcpy(packet->ethHdr.h_dest, sh->peerMac, ETH_ALEN);
+    fprintf(stderr, "Forward PADT packet via %s\n", sh->interface->name);
     sendPacket(NULL, sh->interface->sessionSock, packet, size);
 
     /* Destroy the session */
@@ -996,6 +1015,7 @@ relayHandlePADI(PPPoEInterface const *iface,
     PPPoETag tag;
     unsigned char *loc;
     int i, r;
+    int minSessionCount;
 
     int ifIndex;
 
@@ -1061,12 +1081,26 @@ relayHandlePADI(PPPoEInterface const *iface,
 	return;
     }
 
-    /* Broadcast the PADI on all AC-capable interfaces except the interface
+    /* Search through looking for what the minimum number of sessions
+       per interface is */
+    minSessionCount=-1;
+    for (i=0; i < NumInterfaces; i++) {
+	if (!Interfaces[i].acOK) continue;
+
+	if (minSessionCount<0 || minSessionCount>Interfaces[i].sessionCount) {
+		minSessionCount=Interfaces[i].sessionCount;
+	}
+    }
+
+    /* Broadcast the PADI on all the AC-capable interfaces that match the
+       minimum sessions on the interface and skip the interface
        on which it came */
     for (i=0; i < NumInterfaces; i++) {
 	if (iface == &Interfaces[i]) continue;
 	if (!Interfaces[i].acOK) continue;
+	if (Interfaces[i].sessionCount > minSessionCount) continue;
 	memcpy(packet->ethHdr.h_source, Interfaces[i].mac, ETH_ALEN);
+	fprintf(stderr, "Forward PADI packet via %s\n", Interfaces[i].name);
 	sendPacket(NULL, Interfaces[i].discoverySock, packet, size);
     }
 
@@ -1184,6 +1218,8 @@ relayHandlePADO(PPPoEInterface const *iface,
     /* Set source address to MAC address of interface */
     memcpy(packet->ethHdr.h_source, Interfaces[ifIndex].mac, ETH_ALEN);
 
+    fprintf(stderr, "Forward PADO packet via %s\n", Interfaces[ifIndex].name);
+
     /* Send the PADO to the proper client */
     sendPacket(NULL, Interfaces[ifIndex].discoverySock, packet, size);
 }
@@ -1276,8 +1312,8 @@ relayHandlePADR(PPPoEInterface const *iface,
     memcpy(&ifIndex, tag.payload, sizeof(ifIndex));
 
     if (ifIndex < 0 || ifIndex >= NumInterfaces ||
-	!Interfaces[ifIndex].acOK ||
-	iface == &Interfaces[ifIndex]) {
+	!Interfaces[ifIndex].acOK /* ||
+	iface == &Interfaces[ifIndex]*/ ) {
 	syslog(LOG_ERR,
 	       "PADR packet from %02x:%02x:%02x:%02x:%02x:%02x on interface %s has invalid interface in Relay-Session-Id tag",
 	       packet->ethHdr.h_source[0],
@@ -1299,6 +1335,8 @@ relayHandlePADR(PPPoEInterface const *iface,
 
     /* Set source address to MAC address of interface */
     memcpy(packet->ethHdr.h_source, Interfaces[ifIndex].mac, ETH_ALEN);
+
+    fprintf(stderr, "Forward PADR packet via %s\n", Interfaces[ifIndex].name);
 
     /* Send the PADR to the proper access concentrator */
     sendPacket(NULL, Interfaces[ifIndex].discoverySock, packet, size);
@@ -1393,7 +1431,7 @@ relayHandlePADS(PPPoEInterface const *iface,
 
     if (ifIndex < 0 || ifIndex >= NumInterfaces ||
 	!Interfaces[ifIndex].clientOK ||
-	iface == &Interfaces[ifIndex]) {
+	iface == &Interfaces[ifIndex] ) {
 	syslog(LOG_ERR,
 	       "PADS packet from %02x:%02x:%02x:%02x:%02x:%02x on interface %s has invalid interface in Relay-Session-Id tag",
 	       packet->ethHdr.h_source[0],
@@ -1455,6 +1493,8 @@ relayHandlePADS(PPPoEInterface const *iface,
 
     /* Set source address to MAC address of interface */
     memcpy(packet->ethHdr.h_source, Interfaces[ifIndex].mac, ETH_ALEN);
+
+    fprintf(stderr, "Forward PADS packet via %s\n", Interfaces[ifIndex].name);
 
     /* Send the PADS to the proper client */
     sendPacket(NULL, Interfaces[ifIndex].discoverySock, packet, size);
@@ -1561,4 +1601,44 @@ void cleanSessions(void)
 	}
 	cur = next;
     }
+}
+
+/**********************************************************************
+*%FUNCTION: incrSessionCount
+*%ARGUMENTS:
+* iface -- Ethernet interface
+*%RETURNS:
+* new sessionCount
+*%DESCRIPTION:
+* Increments the number of session active on that interface
+***********************************************************************/
+int
+incrSessionCount(PPPoEInterface const *iface)
+{
+    int ifIndex;
+
+    /* Get array index of interface */
+    ifIndex = iface - Interfaces;
+
+    return(Interfaces[ifIndex].sessionCount++);
+}
+
+/**********************************************************************
+*%FUNCTION: decrSessionCount
+*%ARGUMENTS:
+* iface -- Ethernet interface
+*%RETURNS:
+* new sessionCount
+*%DESCRIPTION:
+* Decrements the number of session active on that interface
+***********************************************************************/
+int
+decrSessionCount(PPPoEInterface const *iface)
+{
+    int ifIndex;
+
+    /* Get array index of interface */
+    ifIndex = iface - Interfaces;
+
+    return(Interfaces[ifIndex].sessionCount--);
 }
