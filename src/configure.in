@@ -127,8 +127,10 @@ dnl Determine whether or not to build PPPoE relay
 PPPOE_RELAY=""
 if test "`uname -s`" = "Linux" ; then
 	PPPOE_RELAY=pppoe-relay
+	PPPOE_MPMAN=pppoe-mpman
 fi
 AC_SUBST(PPPOE_RELAY)
+AC_SUBST(PPPOE_MPMAN)
 
 dnl Checks for library functions.
 AC_FUNC_MEMCMP
@@ -286,9 +288,9 @@ if test "$ac_cv_header_linux_if_packet_h" = "yes" -o "$ac_cv_header_sys_dlpi_h" 
 	TARGETS="$TARGETS pppoe-sniff"
 fi
 
-# pppoe-relay is built only on Linux
+# pppoe-relay & pppoe-mpman are built only on Linux
 if test "$ac_cv_header_linux_if_packet_h" = "yes" ; then
-	TARGETS="$TARGETS pppoe-relay"
+	TARGETS="$TARGETS pppoe-relay pppoe-mpman"
 fi
 
 # plugin is built only if we have kernel support

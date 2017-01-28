@@ -640,6 +640,7 @@ INSTALL_DATA
 INSTALL_SCRIPT
 INSTALL_PROGRAM
 LIBOBJS
+PPPOE_MPMAN
 PPPOE_RELAY
 PPPD_H
 PPPD_INCDIR
@@ -4024,7 +4025,9 @@ fi
 PPPOE_RELAY=""
 if test "`uname -s`" = "Linux" ; then
 	PPPOE_RELAY=pppoe-relay
+	PPPOE_MPMAN=pppoe-mpman
 fi
+
 
 
 { $as_echo "$as_me:${as_lineno-$LINENO}: checking for working memcmp" >&5
@@ -4712,9 +4715,9 @@ if test "$ac_cv_header_linux_if_packet_h" = "yes" -o "$ac_cv_header_sys_dlpi_h" 
 	TARGETS="$TARGETS pppoe-sniff"
 fi
 
-# pppoe-relay is built only on Linux
+# pppoe-relay & pppoe-mpman are built only on Linux
 if test "$ac_cv_header_linux_if_packet_h" = "yes" ; then
-	TARGETS="$TARGETS pppoe-relay"
+	TARGETS="$TARGETS pppoe-relay pppoe-mpman"
 fi
 
 # plugin is built only if we have kernel support
