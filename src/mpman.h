@@ -1,8 +1,8 @@
 /**********************************************************************
 *
-* relay.h
+* mpman.h
 *
-* Definitions for PPPoE relay
+* Definitions for PPPoE MP Manager
 *
 * Copyright (C) 2001-2006 Roaring Penguin Software Inc.
 *

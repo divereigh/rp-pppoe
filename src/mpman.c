@@ -1,10 +1,12 @@
 /***********************************************************************
 *
-* relay.c
+* mpman.c
 *
-* Implementation of PPPoE relay
+* Implementation of PPPoE relay with some extra stuff to allow the
+* the close watching of multi-link ppp sessions.
 *
 * Copyright (C) 2001-2006 Roaring Penguin Software Inc.
+* Copyright (C) 2017 Launtel
 *
 * This program may be distributed according to the terms of the GNU
 * General Public License, version 2 or (at your option) any later version.
@@ -19,7 +21,7 @@ static char const RCSID[] =
 
 #define _GNU_SOURCE 1 /* For SA_RESTART */
 
-#include "relay.h"
+#include "mpman.h"
 
 #include <signal.h>
 

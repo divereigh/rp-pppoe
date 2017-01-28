@@ -39,6 +39,7 @@ LIC_DEFINE=@LIC_DEFINE@
 
 # PPPoE relay -- currently only supported on Linux
 PPPOE_RELAY=@PPPOE_RELAY@
+PPPOE_MPMAN=@PPPOE_MPMAN@
 
 # Program paths
 PPPOE_PATH=$(sbindir)/pppoe
@@ -84,6 +85,9 @@ pppoe: pppoe.o if.o debug.o common.o ppp.o discovery.o
 pppoe-relay: relay.o if.o debug.o common.o
 	@CC@ -o $@ $^ $(LDFLAGS)
 
+pppoe-mpman: mpman.o if.o debug.o common.o
+	@CC@ -o $@ $^ $(LDFLAGS)
+
 pppoe.o: pppoe.c pppoe.h
 	@CC@ $(CFLAGS) '-DVERSION="$(VERSION)"' -c -o $@ $<
 
@@ -120,6 +124,9 @@ debug.o: debug.c pppoe.h
 	@CC@ $(CFLAGS) '-DVERSION="$(VERSION)"' -c -o $@ $<
 
 relay.o: relay.c relay.h pppoe.h
+	@CC@ $(CFLAGS) '-DVERSION="$(VERSION)"' -c -o $@ $<
+
+mpman.o: mpman.c mpman.h pppoe.h
 	@CC@ $(CFLAGS) '-DVERSION="$(VERSION)"' -c -o $@ $<
 
 # Experimental code from Savoir Faire Linux.  I do not consider it
@@ -159,6 +166,7 @@ install: all
 	$(install) -m 755 pppoe-server $(DESTDIR)$(sbindir)
 	if test -x licensed-only/pppoe-server-control ; then $(install) -m 755 licensed-only/pppoe-server-control $(DESTDIR)$(sbindir); fi
 	if test -x pppoe-relay ; then $(install) -m 755 pppoe-relay $(DESTDIR)$(sbindir); fi
+	if test -x pppoe-mpman ; then $(install) -m 755 pppoe-mpman $(DESTDIR)$(sbindir); fi
 	if test -x pppoe-sniff; then $(install) -m 755 pppoe-sniff $(DESTDIR)$(sbindir); fi
 	$(install) -m 755 ../scripts/pppoe-connect $(DESTDIR)$(sbindir)
 	$(install) -m 755 ../scripts/pppoe-start $(DESTDIR)$(sbindir)
