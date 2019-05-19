@@ -36,6 +36,7 @@ static char const RCSID[] =
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <sys/queue.h>
 
 #ifdef HAVE_SYS_TIME_H
 #include <sys/time.h>
@@ -65,6 +66,7 @@ SessionHash *AllHashes;
 SessionHash *FreeHashes;
 SessionHash *Buckets[HASHTAB_SIZE];
 
+PPPoESessionBundle *Bundles;
 volatile unsigned int Epoch = 0;
 volatile unsigned int CleanCounter = 0;
 
@@ -396,7 +398,6 @@ addInterface(char const *ifname,
     i->sessionSock   = openInterface(ifname, Eth_PPPOE_Session,   NULL, NULL);
     i->clientOK = clientOK;
     i->acOK = acOK;
-    i->sessionCount = 0;
     fprintf(stderr, "Interface added: name=%s, ac=%d, client=%d, mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
 	   i->name, i->acOK, i->clientOK,
 	   i->mac[0], i->mac[1],
@@ -464,6 +465,8 @@ initRelay(int nsess)
     AllHashes[2*MaxSessions-1].next = NULL;
 
     FreeHashes = AllHashes;
+
+    Bundles = calloc(MaxSessions, sizeof(PPPoESessionBundle));
 }
 
 /**********************************************************************
@@ -522,8 +525,6 @@ createSession(PPPoEInterface const *ac,
 
     acHash->interface = ac;
     cliHash->interface = cli;
-    incrSessionCount(ac);
-    incrSessionCount(cli);
 
     memcpy(acHash->peerMac, acMac, ETH_ALEN);
     acHash->sesNum = acSes;
@@ -536,9 +537,13 @@ createSession(PPPoEInterface const *ac,
     addHash(acHash);
     addHash(cliHash);
 
+	sess->authOK=0;
+	sess->epdis_class=0;
+	sess->epdis_len=0;
+
     /* Log */
-    syslog(LOG_INFO,
-	   "Opened session: server=%02x:%02x:%02x:%02x:%02x:%02x(%s:%d), client=%02x:%02x:%02x:%02x:%02x:%02x(%s:%d)",
+    fprintf(stderr,
+	   "Opened session: server=%02x:%02x:%02x:%02x:%02x:%02x(%s:%d), client=%02x:%02x:%02x:%02x:%02x:%02x(%s:%d)\n",
 	   acHash->peerMac[0], acHash->peerMac[1],
 	   acHash->peerMac[2], acHash->peerMac[3],
 	   acHash->peerMac[4], acHash->peerMac[5],
@@ -597,8 +602,6 @@ freeSession(PPPoESession *ses, char const *msg)
 
     unhash(ses->acHash);
     unhash(ses->clientHash);
-    decrSessionCount(ses->acHash->interface);
-    decrSessionCount(ses->clientHash->interface);
     NumSessions--;
 }
 
@@ -894,6 +897,8 @@ relayGotSessionPacket(PPPoEInterface const *iface)
     int size;
     SessionHash *sh;
     PPPoESession *ses;
+    int idletime;
+	int clientData; // True if this is data from client to AC, False otherwise
 
     if (receivePacket(iface->sessionSock, &packet, &size) < 0) {
 	return;
@@ -937,21 +942,180 @@ relayGotSessionPacket(PPPoEInterface const *iface)
 
     /* Relay it */
     ses = sh->ses;
+	clientData=(sh == ses->clientHash);
+    idletime=Epoch-ses->epoch;
     ses->epoch = Epoch;
     sh = sh->peer;
     packet.session = sh->sesNum;
     memcpy(packet.ethHdr.h_source, sh->interface->mac, ETH_ALEN);
     memcpy(packet.ethHdr.h_dest, sh->peerMac, ETH_ALEN);
 // #if 0
-    fprintf(stderr, "Relaying %02x:%02x:%02x:%02x:%02x:%02x(%s:%d) to %02x:%02x:%02x:%02x:%02x:%02x(%s:%d)\n",
+    fprintf(stderr, "Relaying %02x:%02x:%02x:%02x:%02x:%02x(%s:%d) to %02x:%02x:%02x:%02x:%02x:%02x(%s:%d) - idle %d\n",
 	    sh->peer->peerMac[0], sh->peer->peerMac[1], sh->peer->peerMac[2],
 	    sh->peer->peerMac[3], sh->peer->peerMac[4], sh->peer->peerMac[5],
 	    sh->peer->interface->name, ntohs(sh->peer->sesNum),
 	    sh->peerMac[0], sh->peerMac[1], sh->peerMac[2],
 	    sh->peerMac[3], sh->peerMac[4], sh->peerMac[5],
-	    sh->interface->name, ntohs(sh->sesNum));
+	    sh->interface->name, ntohs(sh->sesNum), idletime);
 
-    fprintf(stderr, "PPP type: 0x%04x\n", ntohs(* (u_int16_t *) packet.payload));
+    u_int16_t ppp_proto=ntohs(* (u_int16_t *) packet.payload);
+    unsigned char *p=packet.payload + sizeof(u_int16_t);
+    if (ppp_proto==0xc021) { /* LCP */
+		unsigned char lcp_type=*p++;
+		unsigned char seq=*p++;
+		u_int16_t lcp_len=ntohs(* (u_int16_t *) p);
+
+		p+=sizeof(u_int16_t);
+		if (lcp_type==0x09 || lcp_type==0x0a) { // EchoReq or EchoReply
+			u_int32_t magic;
+			magic=ntohl(* (u_int32_t *) p);
+    		fprintf(stderr, "LCP Echo%s, seq=%u, lcp_len=%u, magic=0x%08x\n",
+			(lcp_type==0x09) ? "Req" : "Reply",
+			seq,
+			lcp_len,
+			magic);
+		} else if (lcp_type==0x01) { // ConfigReq
+			int x = lcp_len-4;
+			uint8_t *o = (p + 4);
+
+			while (x > 2) {
+				int type = o[0];
+				int length = o[1];
+
+				if (length == 0 || type == 0 || x < length) break;
+				switch (type) {
+				case 19: // Multilink Endpoint Discriminator
+					{
+						uint8_t epdis_class = o[2];
+						int epdis_len=length-3;
+						unsigned char epdis_data[MAX_EPDISDATA+1];
+						memcpy(epdis_data, o+3, epdis_len);
+						int n;
+						fprintf(stderr, "%s: Req Multi-link EPDIS class=%u, length=%d, data=0x", clientData ? "Up" : "Down", epdis_class, epdis_len);
+						for (n=0; n<epdis_len; n++) {
+							fprintf(stderr, "%02x", epdis_data[n]);
+						}
+						fprintf(stderr, "\n");
+					}
+					
+				}
+				x -= length;
+				o += length;
+			}
+		} else if (lcp_type==0x02) { // ConfigAck
+			int x = lcp_len-4;
+			uint8_t *o = (p + 4);
+
+			while (x > 2) {
+				int type = o[0];
+				int length = o[1];
+
+				if (length == 0 || type == 0 || x < length) break;
+				switch (type) {
+				case 19: // Multilink Endpoint Discriminator
+					{
+						uint8_t epdis_class = o[2];
+						int epdis_len=length-3;
+						unsigned char epdis_data[MAX_EPDISDATA+1];
+						memcpy(epdis_data, o+3, epdis_len);
+						int n;
+						fprintf(stderr, "%s: Ack Multi-link EPDIS class=%u, length=%d, data=0x", clientData ? "Up" : "Down", epdis_class, epdis_len);
+						for (n=0; n<epdis_len; n++) {
+							fprintf(stderr, "%02x", epdis_data[n]);
+						}
+						fprintf(stderr, "\n");
+						if(!clientData) {
+							ses->epdis_class=epdis_class;
+							ses->epdis_len=epdis_len;
+							memcpy(ses->epdis_data, epdis_data, epdis_len);
+							if (ses->authOK) {
+								ses->bundle=joinBundle(ses);
+							} else {
+								fprintf(stderr, "Acked EPDIS but no auth\n");
+							}
+						}
+					}
+					
+				}
+				x -= length;
+				o += length;
+			}
+		}
+    } else if (ppp_proto==0xc023) { /* PAP */
+		unsigned char pap_type=*p++;
+		unsigned char seq=*p++;
+		//u_int16_t pap_len=ntohs(* (u_int16_t *) p);
+
+		p+=sizeof(u_int16_t);
+
+		if (pap_type==1) { // PAP Request
+			unsigned char length=*p++;
+			char peerid[256+1];
+			memcpy(peerid, p, length);
+			peerid[length]='\0';
+			p+=length;
+
+			length=*p++;
+			unsigned char passwd[256+1];
+			memcpy(passwd, p, length);
+			passwd[length]='\0';
+
+			fprintf(stderr, "%s: PAP Request: seq=%d, userid=%s, passwd=%s\n", clientData ? "Up" : "Down", seq, peerid, passwd);
+			strncpy(ses->userid, peerid, MAX_USERIDLEN);
+			ses->userid[MAX_USERIDLEN]='\0';
+			ses->authSeqID=seq;
+			ses->authOK=0;
+		} else if (pap_type==2 || pap_type==3) { // PAP Auth Ack/Nak
+			unsigned char length=*p++;
+			unsigned char message[256+1];
+			memcpy(message, p, length);
+			message[length]='\0';
+			fprintf(stderr, "%s: PAP %s: seq=%d, message=%s\n", clientData ? "Up" : "Down", (pap_type==2) ? "Ack" : "Nak", seq, message);
+			if (ses->authSeqID==seq) {
+				if (pap_type==2) {
+					ses->authOK=1;
+					ses->bundle=joinBundle(ses);
+				} else {
+					ses->authOK=0;
+				}
+			}
+		}
+    } else if (ppp_proto==0xc223) { /* CHAP */
+		unsigned char chap_type=*p++;
+		unsigned char seq=*p++;
+		char chap_name[256+1];
+		u_int16_t chap_len=ntohs(* (u_int16_t *) p);
+
+		p+=sizeof(u_int16_t);
+		if (chap_type==1 || chap_type==2) { // CHAP Challenge/Response
+			int length=chap_len-4;
+			unsigned char *o=p;
+			unsigned char value_size=*p;
+
+			length-=value_size+1;
+			o+=value_size+1;
+
+			memcpy(chap_name, o, length);
+			chap_name[length]='\0';
+			fprintf(stderr, "%s: CHAP %s: name=%s (length=%d), seq=%d\n", clientData ? "Up" : "Down", (chap_type==1) ? "Challenge" : "Response", chap_name, length, seq);
+			if (chap_type==2) {
+				strncpy(ses->userid, chap_name, MAX_USERIDLEN);
+				ses->userid[MAX_USERIDLEN]='\0';
+				ses->authSeqID=seq;
+				ses->authOK=0;
+			}
+		} else if (chap_type==3 || chap_type==4) {
+			fprintf(stderr, "%s: CHAP %s: seq=%d\n", clientData ? "Up" : "Down", (chap_type==3) ? "Success" : "Fail", seq);
+			if (ses->authSeqID==seq) {
+				if (chap_type==3) {
+					ses->authOK=1;
+					ses->bundle=joinBundle(ses);
+				} else {
+					ses->authOK=0;
+				}
+			}
+		}
+    }
 
 // #endif
     sendPacket(NULL, sh->interface->sessionSock, &packet, size);
@@ -1016,6 +1180,7 @@ relayHandlePADI(PPPoEInterface const *iface,
     unsigned char *loc;
     int i, r;
     int minSessionCount;
+    int sessionCount;
 
     int ifIndex;
 
@@ -1087,8 +1252,9 @@ relayHandlePADI(PPPoEInterface const *iface,
     for (i=0; i < NumInterfaces; i++) {
 	if (!Interfaces[i].acOK) continue;
 
-	if (minSessionCount<0 || minSessionCount>Interfaces[i].sessionCount) {
-		minSessionCount=Interfaces[i].sessionCount;
+        sessionCount=getSessionCount(Interfaces+i);
+	if (minSessionCount<0 || minSessionCount>sessionCount) {
+		minSessionCount=sessionCount;
 	}
     }
 
@@ -1098,7 +1264,7 @@ relayHandlePADI(PPPoEInterface const *iface,
     for (i=0; i < NumInterfaces; i++) {
 	if (iface == &Interfaces[i]) continue;
 	if (!Interfaces[i].acOK) continue;
-	if (Interfaces[i].sessionCount > minSessionCount) continue;
+	if (getSessionCount(Interfaces+i) > minSessionCount) continue;
 	memcpy(packet->ethHdr.h_source, Interfaces[i].mac, ETH_ALEN);
 	fprintf(stderr, "Forward PADI packet via %s\n", Interfaces[i].name);
 	sendPacket(NULL, Interfaces[i].discoverySock, packet, size);
@@ -1604,41 +1770,99 @@ void cleanSessions(void)
 }
 
 /**********************************************************************
-*%FUNCTION: incrSessionCount
+*%FUNCTION: getSessionCount
 *%ARGUMENTS:
 * iface -- Ethernet interface
 *%RETURNS:
-* new sessionCount
+* sessionCount
 *%DESCRIPTION:
-* Increments the number of session active on that interface
+* Runs through the active sessions looking for ones attached to
+* this interface
 ***********************************************************************/
 int
-incrSessionCount(PPPoEInterface const *iface)
+getSessionCount(PPPoEInterface const *iface)
 {
-    int ifIndex;
+    int sessionCount=0;
+    PPPoESession *sess;
 
-    /* Get array index of interface */
-    ifIndex = iface - Interfaces;
-
-    return(Interfaces[ifIndex].sessionCount++);
+    for (sess=ActiveSessions; sess; sess=sess->next) {
+	if (sess->acHash->interface == iface || sess->clientHash->interface == iface) {
+		sessionCount++;
+	}
+    }
+    fprintf(stderr, "SessionCount for %s: %d\n", iface->name, sessionCount);
+    return(sessionCount);
 }
 
 /**********************************************************************
-*%FUNCTION: decrSessionCount
+*%FUNCTION: joinBundle
 *%ARGUMENTS:
-* iface -- Ethernet interface
+* thisSession -- PPPoESession
 *%RETURNS:
-* new sessionCount
+* bundle
 *%DESCRIPTION:
-* Decrements the number of session active on that interface
+* Looks for existing bundle to join, or create a new one.
 ***********************************************************************/
-int
-decrSessionCount(PPPoEInterface const *iface)
+PPPoESessionBundle *
+joinBundle(PPPoESession const *thisSession)
 {
-    int ifIndex;
+    PPPoESession *sess;
+	int n;
 
-    /* Get array index of interface */
-    ifIndex = iface - Interfaces;
+    for (sess=ActiveSessions; sess; sess=sess->next) {
+		if (sess!=thisSession && sess->authOK) {
+			if (strcmp(sess->userid, thisSession->userid)==0 &&
+				sess->epdis_class==thisSession->epdis_class &&
+				sess->epdis_len==thisSession->epdis_len &&
+				memcmp(sess->epdis_data, thisSession->epdis_data, sess->epdis_len)==0) {
+				/* Found a matching session */
+				if (sess->bundle) {
+					sess->bundle->sessionCount++;
+					fprintf(stderr, "Found matching bundle: %ld\n", sess->bundle - Bundles);
+					if (thisSession->bundle) {
+						/* Already in a bundle */
+						leaveBundle(thisSession);
+					}
+					return(sess->bundle);
+				} else {
+					fprintf(stderr, "Found matching session, without bundle\n");
+				}
+			}
+		}
+	}
 
-    return(Interfaces[ifIndex].sessionCount--);
+	if (thisSession->bundle) {
+		/* Already in a bundle, use it */
+		fprintf(stderr, "Return existing bundle: %ld\n", thisSession->bundle - Bundles);
+		return(thisSession->bundle);
+	}
+
+	/* None found - create one */
+	for(n=0; n<MaxSessions; n++) {
+		if (Bundles[n].sessionCount==0) {
+			Bundles[n].sessionCount=1;
+			fprintf(stderr, "Created new bundle: %d\n", n);
+			return(Bundles+n);
+		}
+	}
+	fprintf(stderr, "No available bundles!\n");
+	return(NULL);
+}
+
+/**********************************************************************
+*%FUNCTION: leaveBundle
+*%ARGUMENTS:
+* thisSession -- PPPoESession
+*%RETURNS:
+* void
+*%DESCRIPTION:
+* Removes ourselves from an existing bundle.
+***********************************************************************/
+void
+leaveBundle(PPPoESession const *thisSession)
+{
+	if (thisSession->bundle) {
+		fprintf(stderr, "Leave from bundle: %ld\n", thisSession->bundle - Bundles);
+		thisSession->bundle->sessionCount--;
+	}
 }

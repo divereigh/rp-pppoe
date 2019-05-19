@@ -17,6 +17,9 @@
 
 #include "pppoe.h"
 
+#define MAX_USERIDLEN 128
+#define MAX_EPDISDATA 20
+
 /* Description for each active Ethernet interface */
 typedef struct InterfaceStruct {
     char name[IFNAMSIZ+1];	/* Interface name */
@@ -24,9 +27,13 @@ typedef struct InterfaceStruct {
     int sessionSock;		/* Socket for session frames */
     int clientOK;		/* Client requests allowed (PADI, PADR) */
     int acOK;			/* AC replies allowed (PADO, PADS) */
-    int sessionCount;		/* Number active sessions on interface */
     unsigned char mac[ETH_ALEN]; /* MAC address */
 } PPPoEInterface;
+
+/* Session bundle for multi-link relay */
+typedef struct SessionBundleStruct {
+    int sessionCount;
+} PPPoESessionBundle;
 
 /* Session state for relay */
 struct SessionHashStruct;
@@ -37,6 +44,13 @@ typedef struct SessionStruct {
     struct SessionHashStruct *clientHash; /* Hash bucket for client MAC/Session */
     unsigned int epoch;		/* Epoch when last activity was seen */
     UINT16_t sesNum;		/* Session number assigned by relay */
+    char userid[MAX_USERIDLEN+1]; /* Userid used to authenticate */
+    uint8_t authSeqID;		/* Seq ID Used for authentication */
+    uint8_t authOK;		/* Authentication complete */
+    uint8_t epdis_class;	/* Class used for Mp End-point discriminator */
+    int epdis_len;		/* Length of next field */
+    unsigned char epdis_data[MAX_EPDISDATA+1]; /* EPDIS Data */
+    PPPoESessionBundle *bundle;	/* Bundle for this session (if any) */
 } PPPoESession;
 
 /* Hash table entry to find sessions */
@@ -91,8 +105,9 @@ void relaySendError(unsigned char code,
 
 void alarmHandler(int sig);
 void cleanSessions(void);
-int incrSessionCount(PPPoEInterface const *iface);
-int decrSessionCount(PPPoEInterface const *iface);
+int getSessionCount(PPPoEInterface const *iface);
+PPPoESessionBundle *joinBundle(PPPoESession const *thisSession);
+void leaveBundle(PPPoESession const *thisSession);
 
 #define MAX_INTERFACES 8
 #define DEFAULT_SESSIONS 5000
