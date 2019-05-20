@@ -14,6 +14,7 @@
 ***********************************************************************/
 
 #include "pppoe.h"
+#include "constants.h"
 
 #ifdef HAVE_SYSLOG_H
 #include <syslog.h>
@@ -826,6 +827,8 @@ asyncReadFromEth(PPPoEConnection *conn, int sock, int clampMss)
 	clampMSS(&packet, "incoming", clampMss);
     }
 
+    decodePPP(conn, (void *) packet.payload, plen);
+#if 0
     /* Compute FCS */
     fcs = pppFCS16(PPPINITFCS16, header, 2);
     fcs = pppFCS16(fcs, packet.payload, plen) ^ 0xffff;
@@ -862,6 +865,7 @@ asyncReadFromEth(PPPoEConnection *conn, int sock, int clampMss)
     if (write(1, pppBuf, (ptr-pppBuf)) < 0) {
 	fatalSys("asyncReadFromEth: write");
     }
+#endif
 }
 
 /**********************************************************************
@@ -956,6 +960,8 @@ syncReadFromEth(PPPoEConnection *conn, int sock, int clampMss)
 	clampMSS(&packet, "incoming", clampMss);
     }
 
+    decodePPP(conn, (void *) packet.payload, plen);
+#if 0
     /* Ship it out */
     vec[0].iov_base = (void *) dummy;
     dummy[0] = FRAME_ADDR;
@@ -967,4 +973,633 @@ syncReadFromEth(PPPoEConnection *conn, int sock, int clampMss)
     if (writev(1, vec, 2) < 0) {
 	fatalSys("syncReadFromEth: write");
     }
+#endif
 }
+
+#define PPPLCP          0xC021
+#define MAXETHER        1500
+
+enum {
+	ConfigReq = 1,
+	ConfigAck,
+	ConfigNak,
+	ConfigRej,
+	TerminateReq,
+	TerminateAck,
+	CodeRej,
+	ProtocolRej,
+	EchoReq,
+	EchoReply,
+	DiscardRequest,
+	IdentRequest
+};
+
+void
+decodePPP(PPPoEConnection *conn, void *buf, int len)
+{
+	UINT16_t l = len;
+	uint8_t *p = buf;
+	UINT16_t proto;
+
+	proto = ntohs(*(UINT16_t *) p);
+	p+=2;
+	l-=2;
+	if (proto == PPPLCP){
+		processlcp(conn, p, l);
+	}
+}
+
+
+#define LOG logmsg
+
+// Process LCP messages
+void
+processlcp(PPPoEConnection *conn, uint8_t *p, UINT16_t l)
+{
+	uint8_t b[MAXETHER];
+	uint8_t *q = NULL;
+	UINT16_t hl;
+
+	// CSTAT(processlcp);
+
+	dumpHex(conn->debugFile, p, l);
+	if (l < 4)
+	{
+		LOG(conn->debugFile, 1, "Short LCP %d bytes\n", l);
+		return ;
+	}
+
+	if ((hl = ntohs(*(uint16_t *) (p + 2))) > l)
+	{
+		LOG(conn->debugFile, 1, "Length mismatch LCP %u/%u\n", hl, l);
+		return ;
+	}
+	l = hl;
+
+	LOG(conn->debugFile, ((*p == EchoReq || *p == EchoReply) ? 4 : 3), 
+		"LCP: recv %s\n", ppp_code(*p));
+
+	// if (config->debug > 3) dumplcp(p, l);
+
+	if (*p == ConfigAck)
+	{
+#if 0
+		int x = l - 4;
+		uint8_t *o = (p + 4);
+		int authtype = 0;
+
+		while (x > 2)
+		{
+			int type = o[0];
+			int length = o[1];
+
+			if (length == 0 || type == 0 || x < length) break;
+			switch (type)
+			{
+				case 3: // Authentication-Protocol
+					{
+						int proto = ntohs(*(uint16_t *)(o + 2));
+						if (proto == PPPPAP)
+							authtype = AUTHPAP;
+						else if (proto == PPPCHAP && *(o + 4) == 5)
+							authtype = AUTHCHAP;
+					}
+
+					break;
+			}
+			x -= length;
+			o += length;
+		}
+
+		if (!session[s].ip && authtype)
+			sess_local[s].lcp_authtype = authtype;
+
+		switch (session[s].ppp.lcp)
+		{
+		case RequestSent:
+		    	initialise_restart_count(s, lcp);
+			change_state(s, lcp, AckReceived);
+			break;
+
+		case AckReceived:
+		case Opened:
+		    	LOG(2, s, t, "LCP: ConfigAck in state %s?  Sending ConfigReq\n", ppp_state(session[s].ppp.lcp));
+			if (session[s].ppp.lcp == Opened)
+				lcp_restart(s);
+
+			sendlcp(s, t);
+			change_state(s, lcp, RequestSent);
+			break;
+
+		case AckSent:
+			lcp_open(s, t);
+			break;
+
+		default:
+		    	LOG(2, s, t, "LCP: ignoring %s in state %s\n", ppp_code(*p), ppp_state(session[s].ppp.lcp));
+		}
+#endif
+	}
+	else if (*p == ConfigReq)
+	{
+		int x = l - 4;
+		uint8_t *o = (p + 4);
+		uint8_t *response = 0;
+		static uint8_t asyncmap[4] = { 0, 0, 0, 0 }; // all zero
+		static uint8_t authproto[5];
+		int changed = 0;
+
+		while (x > 2)
+		{
+			int type = o[0];
+			int length = o[1];
+
+			if (length == 0 || type == 0 || x < length) break;
+			switch (type)
+			{
+				case 1: // Maximum-Receive-Unit
+					{
+						uint16_t mru = ntohs(*(uint16_t *)(o + 2));
+						if (mru >= MINMTU)
+						{
+							conn.mru = mru;
+							changed++;
+							break;
+						}
+
+						LOG(conn->debugFile, 3, "    Remote requesting MRU of %u.  Rejecting.\n", mru);
+						mru = htons(MRU);
+						q = ppp_conf_nak(conn, b, sizeof(b), PPPLCP, &response, q, p, o, (uint8_t *) &mru, sizeof(mru));
+					}
+					break;
+
+				case 2: // Async-Control-Character-Map
+					if (!ntohl(*(uint32_t *)(o + 2))) // all bits zero is OK
+						break;
+
+					LOG(conn->debugFile, 3, "    Remote requesting asyncmap.  Rejecting.\n");
+					q = ppp_conf_nak(s, b, sizeof(b), PPPLCP, &response, q, p, o, asyncmap, sizeof(asyncmap));
+					break;
+
+				case 3: // Authentication-Protocol
+					{
+#if 0
+						int proto = ntohs(*(uint16_t *)(o + 2));
+						char proto_name[] = "0x0000";
+						int alen;
+
+						if (proto == PPPPAP)
+						{
+							if (config->radius_authtypes & AUTHPAP)
+							{
+								sess_local[s].lcp_authtype = AUTHPAP;
+								break;
+							}
+
+							strcpy(proto_name, "PAP");
+						}
+						else if (proto == PPPCHAP)
+						{
+							if (config->radius_authtypes & AUTHCHAP
+							    && *(o + 4) == 5) // MD5
+							{
+								sess_local[s].lcp_authtype = AUTHCHAP;
+								break;
+							}
+
+							strcpy(proto_name, "CHAP");
+						}
+						else
+							sprintf(proto_name, "%#4.4x", proto);
+
+						LOG(3, s, t, "    Remote requesting %s authentication.  Rejecting.\n", proto_name);
+
+						alen = add_lcp_auth(authproto, sizeof(authproto), config->radius_authprefer);
+						if (alen < 2) break; // paranoia
+
+						q = ppp_conf_nak(s, b, sizeof(b), PPPLCP, &response, q, p, o, authproto + 2, alen - 2);
+						if (q && *response == ConfigNak &&
+							config->radius_authtypes != config->radius_authprefer)
+						{
+							// alternate type
+						    	alen = add_lcp_auth(authproto, sizeof(authproto), config->radius_authtypes & ~config->radius_authprefer);
+							if (alen < 2) break;
+							q = ppp_conf_nak(s, b, sizeof(b), PPPLCP, &response, q, p, o, authproto + 2, alen - 2);
+						}
+
+						break;
+					}
+					break;
+
+				case 4: // Quality-Protocol
+				case 5: // Magic-Number
+				case 7: // Protocol-Field-Compression
+				case 8: // Address-And-Control-Field-Compression
+					break;
+
+				case 17: // Multilink Max-Receive-Reconstructed-Unit
+					{
+						uint16_t mrru = ntohs(*(uint16_t *)(o + 2));
+						session[s].mrru = mrru;
+						changed++;
+						LOG(3, s, t, "    Received PPP LCP option MRRU: %d\n",mrru);
+					}
+					break;
+					
+				case 18: // Multilink Short Sequence Number Header Format
+					{
+						session[s].mssf = 1;
+						changed++;
+						LOG(3, s, t, "    Received PPP LCP option MSSN format\n");
+					}
+					break;
+					
+				case 19: // Multilink Endpoint Discriminator
+					{
+						uint8_t epdis_class = o[2];
+						int addr;
+
+						session[s].epdis.addr_class = epdis_class;
+						session[s].epdis.length = length - 3;
+						if (session[s].epdis.length > 20)
+						{
+							LOG(1, s, t, "Error: received EndDis Address Length more than 20: %d\n", session[s].epdis.length);
+							session[s].epdis.length = 20;
+						}
+
+						for (addr = 0; addr < session[s].epdis.length; addr++)
+							session[s].epdis.address[addr] = o[3+addr];
+
+						changed++;
+
+						switch (epdis_class)
+						{
+						case LOCALADDR:
+							LOG(3, s, t, "    Received PPP LCP option Multilink EndDis Local Address Class: %d\n",epdis_class);
+							break;
+						case IPADDR:
+							LOG(3, s, t, "    Received PPP LCP option Multilink EndDis IP Address Class: %d\n",epdis_class);
+							break;
+						case IEEEMACADDR:
+							LOG(3, s, t, "    Received PPP LCP option Multilink EndDis IEEE MAC Address Class: %d\n",epdis_class);
+							break;
+						case PPPMAGIC:
+							LOG(3, s, t, "    Received PPP LCP option Multilink EndDis PPP Magic No Class: %d\n",epdis_class);
+							break;
+						case PSNDN:
+							LOG(3, s, t, "    Received PPP LCP option Multilink EndDis PSND No Class: %d\n",epdis_class);
+							break;
+						default:
+							LOG(3, s, t, "    Received PPP LCP option Multilink EndDis NULL Class %d\n",epdis_class);
+						}
+					}
+					break;
+
+				default: // Reject any unknown options
+					LOG(3, s, t, "    Rejecting unknown PPP LCP option %d\n", type);
+					q = ppp_conf_rej(s, b, sizeof(b), PPPLCP, &response, q, p, o);
+			}
+			x -= length;
+			o += length;
+		}
+
+		if (changed)
+			cluster_send_session(s);
+
+		if (response)
+		{
+			l = q - response; // LCP packet length
+			*((uint16_t *) (response + 2)) = htons(l); // update header
+		}
+		else
+		{
+			// Send packet back as ConfigAck
+			response = makeppp(b, sizeof(b), p, l, s, t, PPPLCP, 0, 0, 0);
+			if (!response) return;
+			*response = ConfigAck;
+		}
+
+		switch (session[s].ppp.lcp)
+		{
+		case Closed:
+			response = makeppp(b, sizeof(b), p, 2, s, t, PPPLCP, 0, 0, 0);
+			if (!response) return;
+			*response = TerminateAck;
+			*((uint16_t *) (response + 2)) = htons(l = 4);
+			break;
+
+		case Stopped:
+		    	initialise_restart_count(s, lcp);
+			sendlcp(s, t);
+			if (*response == ConfigAck)
+				change_state(s, lcp, AckSent);
+			else
+				change_state(s, lcp, RequestSent);
+
+			break;
+
+		case RequestSent:
+			if (*response == ConfigAck)
+				change_state(s, lcp, AckSent);
+
+			break;
+
+		case AckReceived:
+			if (*response == ConfigAck)
+				lcp_open(s, t);
+
+			break;
+
+		case Opened:
+		    	lcp_restart(s);
+			sendlcp(s, t);
+			/* fallthrough */
+
+		case AckSent:
+			if (*response == ConfigAck)
+				change_state(s, lcp, AckSent);
+			else
+				change_state(s, lcp, RequestSent);
+
+			break;
+
+		case Closing:
+			sessionshutdown(s, "LCP: ConfigReq in state Closing. This should not happen. Killing session.", CDN_ADMIN_DISC, TERM_LOST_SERVICE);
+			break;
+
+		default:
+		    	LOG(2, s, t, "LCP: ignoring %s in state %s\n", ppp_code(*p), ppp_state(session[s].ppp.lcp));
+			return;
+		}
+
+		LOG(3, s, t, "LCP: send %s\n", ppp_code(*response));
+		if (config->debug > 3) dumplcp(response, l);
+
+		tunnelsend(b, l + (response - b), t);
+	}
+	else if (*p == ConfigNak || *p == ConfigRej)
+	{
+#if 0
+		int x = l - 4;
+		uint8_t *o = (p + 4);
+		int authtype = -1;
+
+		while (x > 2)
+		{
+			int type = o[0];
+			int length = o[1];
+
+			if (length == 0 || type == 0 || x < length) break;
+			switch (type)
+			{
+				case 1: // Maximum-Receive-Unit
+					if (*p == ConfigNak)
+					{
+						if (length < 4) break;
+						sess_local[s].ppp_mru = ntohs(*(uint16_t *)(o + 2));
+						LOG(3, s, t, "    Remote requested MRU of %u\n", sess_local[s].ppp_mru);
+					}
+					else
+					{
+						sess_local[s].ppp_mru = 0;
+						LOG(3, s, t, "    Remote rejected MRU negotiation\n");
+					}
+
+					break;
+
+				case 3: // Authentication-Protocol
+					if (authtype > 0)
+						break;
+
+					if (*p == ConfigNak)
+					{
+						int proto;
+
+						if (length < 4) break;
+						proto = ntohs(*(uint16_t *)(o + 2));
+
+						if (proto == PPPPAP)
+						{
+							authtype = config->radius_authtypes & AUTHPAP;
+							LOG(3, s, t, "    Remote requested PAP authentication...%sing\n",
+								authtype ? "accept" : "reject");
+						}
+						else if (proto == PPPCHAP && length > 4 && *(o + 4) == 5)
+						{
+							authtype = config->radius_authtypes & AUTHCHAP;
+							LOG(3, s, t, "    Remote requested CHAP authentication...%sing\n",
+								authtype ? "accept" : "reject");
+						}
+						else
+						{
+							LOG(3, s, t, "    Rejecting unsupported authentication %#4x\n",
+								proto);
+						}
+					}
+					else
+					{
+						LOG(2, s, t, "LCP: remote rejected auth negotiation\n");
+					    	authtype = 0; // shutdown
+					}
+
+					break;
+
+				case 5: // Magic-Number
+					session[s].magic = 0;
+					if (*p == ConfigNak)
+					{
+						if (length < 6) break;
+						session[s].magic = ntohl(*(uint32_t *)(o + 2));
+					}
+
+					if (session[s].magic)
+						LOG(3, s, t, "    Remote requested magic-no %x\n", session[s].magic);
+					else
+						LOG(3, s, t, "    Remote rejected magic-no\n");
+
+					cluster_send_session(s);
+					break;
+
+				case 17: // Multilink Max-Receive-Reconstructed-Unit
+				{
+					if (*p == ConfigNak)
+					{
+						sess_local[s].mp_mrru = ntohs(*(uint16_t *)(o + 2));
+						LOG(3, s, t, "    Remote requested MRRU of %u\n", sess_local[s].mp_mrru);
+					}
+					else
+					{
+						sess_local[s].mp_mrru = 0;
+						LOG(3, s, t, "    Remote rejected MRRU negotiation\n");
+					}
+				}
+				break;
+
+				case 18: // Multilink Short Sequence Number Header Format
+				{
+					if (*p == ConfigNak)
+					{
+						sess_local[s].mp_mssf = 0;
+						LOG(3, s, t, "    Remote requested Naked mssf\n");
+					}
+					else
+					{
+						sess_local[s].mp_mssf = 0;
+						LOG(3, s, t, "    Remote rejected mssf\n");
+					}
+				}
+				break;
+
+				case 19: // Multilink Endpoint Discriminator
+				{
+					if (*p == ConfigNak)
+					{
+						LOG(2, s, t, "    Remote should not configNak Endpoint Dis!\n");
+					}
+					else
+					{
+						sess_local[s].mp_epdis = 0;
+						LOG(3, s, t, "    Remote rejected Endpoint Discriminator\n");
+					}
+				}
+				break;
+
+				default:
+				    	LOG(2, s, t, "LCP: remote sent %s for type %u?\n", ppp_code(*p), type);
+					sessionshutdown(s, "Unable to negotiate LCP.", CDN_ADMIN_DISC, TERM_USER_ERROR);
+					return;
+			}
+			x -= length;
+			o += length;
+		}
+
+		if (!authtype)
+		{
+			sessionshutdown(s, "Unsupported authentication.", CDN_ADMIN_DISC, TERM_USER_ERROR);
+			return;
+		}
+
+		if (authtype > 0)
+			sess_local[s].lcp_authtype = authtype;
+
+		switch (session[s].ppp.lcp)
+		{
+		case Closed:
+		case Stopped:
+		    	{
+				uint8_t *response = makeppp(b, sizeof(b), p, 2, s, t, PPPLCP, 0, 0, 0);
+				if (!response) return;
+				*response = TerminateAck;
+				*((uint16_t *) (response + 2)) = htons(l = 4);
+
+				LOG(3, s, t, "LCP: send %s\n", ppp_code(*response));
+				if (config->debug > 3) dumplcp(response, l);
+
+				tunnelsend(b, l + (response - b), t);
+			}
+			break;
+
+		case RequestSent:
+		case AckSent:
+		    	initialise_restart_count(s, lcp);
+			sendlcp(s, t);
+			break;
+
+		case AckReceived:
+		    	LOG(2, s, t, "LCP: ConfigNak in state %s?  Sending ConfigReq\n", ppp_state(session[s].ppp.lcp));
+			sendlcp(s, t);
+			break;
+
+		case Opened:
+		    	lcp_restart(s);
+			sendlcp(s, t);
+			break;
+
+		default:
+		    	LOG(2, s, t, "LCP: ignoring %s in state %s\n", ppp_code(*p), ppp_state(session[s].ppp.lcp));
+			return;
+		}
+	}
+	else if (*p == TerminateReq)
+	{
+		switch (session[s].ppp.lcp)
+		{
+		case Closed:
+		case Stopped:
+		case Closing:
+		case Stopping:
+		case RequestSent:
+		case AckReceived:
+		case AckSent:
+		    	break;
+
+		case Opened:
+		    	lcp_restart(s);
+		    	zero_restart_count(s, lcp);
+			change_state(s, lcp, Closing);
+			break;
+
+		default:
+		    	LOG(2, s, t, "LCP: ignoring %s in state %s\n", ppp_code(*p), ppp_state(session[s].ppp.lcp));
+			return;
+		}
+
+		*p = TerminateAck;	// send ack
+		q = makeppp(b, sizeof(b),  p, l, s, t, PPPLCP, 0, 0, 0);
+		if (!q) return;
+
+		LOG(3, s, t, "LCP: send %s\n", ppp_code(*q));
+		if (config->debug > 3) dumplcp(q, l);
+
+		tunnelsend(b, l + (q - b), t); // send it
+	}
+	else if (*p == ProtocolRej)
+	{
+	    	uint16_t proto = 0;
+
+		if (l > 4)
+		{
+			proto = *(p+4);
+			if (l > 5 && !(proto & 1))
+			{
+				proto <<= 8;
+				proto |= *(p+5);
+			}
+		}
+
+		if (proto == PPPIPV6CP)
+		{
+			LOG(3, s, t, "IPv6 rejected\n");
+			change_state(s, ipv6cp, Closed);
+		}
+		else
+		{
+			LOG(3, s, t, "LCP protocol reject: 0x%04X\n", proto);
+		}
+	}
+	else if (*p == EchoReq)
+	{
+		*p = EchoReply;		// reply
+		*(uint32_t *) (p + 4) = htonl(session[s].magic); // our magic number
+		q = makeppp(b, sizeof(b), p, l, s, t, PPPLCP, 0, 0, 0);
+		if (!q) return;
+
+		LOG(4, s, t, "LCP: send %s\n", ppp_code(*q));
+		if (config->debug > 3) dumplcp(q, l);
+
+		tunnelsend(b, l + (q - b), t); // send it
+
+		if (session[s].ppp.phase == Network && session[s].ppp.ipv6cp == Opened)
+			send_ipv6_ra(s, t, NULL); // send a RA
+	}
+	else if (*p == EchoReply)
+	{
+		// Ignore it, last_packet time is set earlier than this.
+	}
+	else if (*p != CodeRej)
+	{
+		ppp_code_rej(s, t, PPPLCP, "LCP", p, l, b, sizeof(b));
+#endif
+	}
+}
+

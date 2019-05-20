@@ -323,6 +323,7 @@ void sysErr(char const *str);
 #ifdef DEBUGGING_ENABLED
 void dumpPacket(FILE *fp, PPPoEPacket *packet, char const *dir);
 void dumpHex(FILE *fp, unsigned char const *buf, int len);
+void logmsg(FILE *fp, int level, const char *format, ...);
 #endif
 int parsePacket(PPPoEPacket *packet, ParseFunc *func, void *extra);
 void parseLogErrs(UINT16_t typ, UINT16_t len, unsigned char *data, void *xtra);
@@ -344,6 +345,8 @@ UINT16_t pppFCS16(UINT16_t fcs, unsigned char *cp, int len);
 void discovery(PPPoEConnection *conn);
 unsigned char *findTag(PPPoEPacket *packet, UINT16_t tagType,
 		       PPPoETag *tag);
+void decodePPP(PPPoEConnection *conn, void *buf, int len);
+void processlcp(PPPoEConnection *conn, unsigned char *p, UINT16_t l);
 
 #define SET_STRING(var, val) do { if (var) free(var); var = strDup(val); } while(0);
 

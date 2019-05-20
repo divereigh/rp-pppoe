@@ -23,6 +23,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <stdarg.h>
 
 /**********************************************************************
 *%FUNCTION: dumpHex
@@ -144,6 +145,25 @@ dumpPacket(FILE *fp, PPPoEPacket *packet, char const *dir)
 	    (unsigned) packet->ethHdr.h_dest[4],
 	    (unsigned) packet->ethHdr.h_dest[5]);
     dumpHex(fp, packet->payload, ntohs(packet->length));
+}
+
+void
+logmsg(FILE *fp, int level, const char *format, ...)
+{
+	static char message[65536] = {0};
+	va_list ap;
+
+	// if (config->debug < level) return;
+
+	va_start(ap, format);
+	vsnprintf(message, sizeof(message), format, ap);
+
+	// if (log_stream)
+		fprintf(fp, "%s", message);
+	// else if (syslog_log)
+	//	syslog(level + 2, "%02d/%02d %s", t, s, message); // We don't need LOG_EMERG or LOG_ALERT
+
+	va_end(ap);
 }
 
 #endif /* DEBUGGING_ENABLED */

@@ -78,7 +78,7 @@ pppoe-server: pppoe-server.o if.o debug.o common.o md5.o libevent/libevent.a @PP
 #pppoe-bridge: pppoe-bridge.o ppp.o modem.o rs232.o if.o debug.o common.o md5.o libevent/libevent.a @PPPOE_SERVER_DEPS@
 #	@CC@ -o $@ @RDYNAMIC@ $^ $(LDFLAGS) $(PPPOE_SERVER_LIBS) -Llibevent -levent
 
-pppoe: pppoe.o if.o debug.o common.o ppp.o discovery.o
+pppoe: pppoe.o if.o debug.o constants.o common.o ppp.o discovery.o
 	@CC@ -o $@ $^ $(LDFLAGS)
 
 pppoe-relay: relay.o if.o debug.o common.o
