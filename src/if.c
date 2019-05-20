@@ -495,7 +495,7 @@ openInterface(char const *ifname, UINT16_t type, unsigned char *hwaddr, UINT16_t
 #ifdef HAVE_STRUCT_SOCKADDR_LL
     /* Get interface index */
     sa.sll_family = AF_PACKET;
-    sa.sll_protocol = htons(type);
+    sa.sll_protocol = type ? htons(type) : htons(ETH_P_ALL);
 
     strncpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
     if (ioctl(fd, SIOCGIFINDEX, &ifr) < 0) {
