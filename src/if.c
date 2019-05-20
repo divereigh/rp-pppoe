@@ -595,6 +595,84 @@ sendPacket(PPPoEConnection *conn, int sock, PPPoEPacket *pkt, int size)
     return 0;
 }
 
+/***********************************************************************
+*%FUNCTION: sendIPPacket
+*%ARGUMENTS:
+* sock -- socket to send to
+* pkt -- the packet to transmit
+* size -- size of packet (in bytes)
+*%RETURNS:
+* 0 on success; -1 on failure
+*%DESCRIPTION:
+* Transmits a packet
+***********************************************************************/
+int
+sendIPPacket(PPPoEConnection *conn, int sock, IPoEPacket *pkt, int size)
+{
+#if defined(USE_BPF)
+    if (write(sock, pkt, size) < 0) {
+	sysErr("write (sendPacket)");
+	return -1;
+    }
+#elif defined(HAVE_STRUCT_SOCKADDR_LL)
+    if (send(sock, pkt, size, 0) < 0 && (errno != ENOBUFS)) {
+	sysErr("send (sendPacket)");
+	return -1;
+    }
+#else
+#ifdef USE_DLPI
+
+#define ABS(x)          ((x) < 0 ? -(x) : (x))
+
+	u_char  addr[MAXDLADDR];
+	u_char  phys[MAXDLADDR];
+	u_char  sap[MAXDLADDR];
+	u_char    xmitbuf[MAXDLBUF];
+	int	data_size;
+
+	short	tmp_sap;
+
+	tmp_sap = htons(pkt->ethHdr.h_proto);
+	data_size = size - sizeof(struct ethhdr);
+
+	memcpy((char *)phys, (char *)pkt->ethHdr.h_dest, ETHERADDRL);
+	memcpy((char *)sap,  (char *)&tmp_sap, sizeof(ushort_t));
+	memcpy((char *)xmitbuf, (char *)pkt + sizeof(struct ethhdr), data_size);
+
+	if (dl_saplen > 0) {  /* order is sap+phys */
+		(void) memcpy((char*)addr, (char*)&sap, dl_abssaplen);
+		(void) memcpy((char*)addr+dl_abssaplen, (char*)phys, ETHERADDRL);
+	} else {        /* order is phys+sap */
+		(void) memcpy((char*)addr, (char*)phys, ETHERADDRL);
+		(void) memcpy((char*)addr+ETHERADDRL, (char*)&sap, dl_abssaplen);
+	}
+
+#ifdef DL_DEBUG
+	printf("%02x:%02x:%02x:%02x:%02x:%02x %02x:%02x\n",
+		addr[0],addr[1],addr[2],addr[3],addr[4],addr[5],
+		addr[6],addr[7]);
+#endif
+
+	dlunitdatareq(sock, addr, dl_addrlen, 0, 0, xmitbuf, data_size);
+
+
+
+#else
+    struct sockaddr sa;
+
+    if (!conn) {
+	rp_fatal("relay and server not supported on Linux 2.0 kernels");
+    }
+    strcpy(sa.sa_data, conn->ifName);
+    if (sendto(sock, pkt, size, 0, &sa, sizeof(sa)) < 0) {
+	sysErr("sendto (sendPacket)");
+	return -1;
+    }
+#endif
+#endif
+    return 0;
+}
+
 #ifdef USE_BPF
 /***********************************************************************
 *%FUNCTION: clearPacketHeader
@@ -691,6 +769,87 @@ receivePacket(int sock, PPPoEPacket *pkt, int *size)
 #else
     if ((*size = recv(sock, pkt, sizeof(PPPoEPacket), 0)) < 0) {
 	sysErr("recv (receivePacket)");
+	return -1;
+    }
+#endif
+#endif
+    return 0;
+}
+
+/***********************************************************************
+*%FUNCTION: receiveIPPacket
+*%ARGUMENTS:
+* sock -- socket to read from
+* pkt -- place to store the received packet
+* size -- set to size of packet in bytes
+*%RETURNS:
+* >= 0 if all OK; < 0 if error
+*%DESCRIPTION:
+* Receives a packet
+***********************************************************************/
+int
+receiveIPPacket(int sock, IPoEPacket *pkt, int *size)
+{
+#ifdef USE_BPF
+    struct bpf_hdr hdr;
+    int seglen, copylen;
+
+    if (bpfSize <= 0) {
+	bpfOffset = 0;
+	if ((bpfSize = read(sock, bpfBuffer, bpfLength)) < 0) {
+	    sysErr("read (receivePacket)");
+	    return -1;
+	}
+    }
+    if (bpfSize < sizeof(hdr)) {
+	syslog(LOG_ERR, "Truncated bpf packet header: len=%d", bpfSize);
+	clearPacketHeader(pkt);		/* resets bpfSize and bpfOffset */
+	return 0;
+    }
+    memcpy(&hdr, bpfBuffer + bpfOffset, sizeof(hdr));
+    if (hdr.bh_caplen != hdr.bh_datalen) {
+	syslog(LOG_ERR, "Truncated bpf packet: caplen=%d, datalen=%d",
+	       hdr.bh_caplen, hdr.bh_datalen);
+	clearPacketHeader(pkt);		/* resets bpfSize and bpfOffset */
+	return 0;
+    }
+    seglen = hdr.bh_hdrlen + hdr.bh_caplen;
+    if (seglen > bpfSize) {
+	syslog(LOG_ERR, "Truncated bpf packet: seglen=%d, bpfSize=%d",
+	       seglen, bpfSize);
+	clearPacketHeader(pkt);		/* resets bpfSize and bpfOffset */
+	return 0;
+    }
+    seglen = BPF_WORDALIGN(seglen);
+    *size = copylen = ((hdr.bh_caplen < sizeof(PPPoEPacket)) ?
+			hdr.bh_caplen : sizeof(PPPoEPacket));
+    memcpy(pkt, bpfBuffer + bpfOffset + hdr.bh_hdrlen, copylen);
+    if (seglen >= bpfSize) {
+	bpfSize = bpfOffset = 0;
+    } else {
+	bpfSize -= seglen;
+	bpfOffset += seglen;
+    }
+#else
+#ifdef USE_DLPI
+	struct strbuf data;
+	int flags = 0;
+	int retval;
+
+	data.buf = (char *) pkt;
+	data.maxlen = MAXDLBUF;
+	data.len = 0;
+
+	if ((retval = getmsg(sock, NULL, &data, &flags)) < 0) {
+	    sysErr("read (receivePacket)");
+	    return -1;
+	}
+
+	*size = data.len;
+
+#else
+    if ((*size = recv(sock, pkt, sizeof(IPoEPacket), 0)) < 0) {
+	sysErr("recv (receiveIPPacket)");
 	return -1;
     }
 #endif

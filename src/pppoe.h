@@ -232,6 +232,12 @@ typedef struct PPPoEPacketStruct {
     unsigned char payload[ETH_JUMBO_LEN]; /* A bit of room to spare */
 } PPPoEPacket;
 
+/* An IPv4 Packet, including Ethernet headers */
+typedef struct IPoEPacketStruct {
+    struct ethhdr ethHdr;	/* Ethernet header */
+    unsigned char payload[ETH_JUMBO_LEN]; /* A bit of room to spare */
+} IPoEPacket;
+
 /* Header size of a PPPoE packet */
 #define PPPOE_OVERHEAD 6  /* type, code, session, length */
 #define HDR_SIZE (sizeof(struct ethhdr) + PPPOE_OVERHEAD)
@@ -315,7 +321,9 @@ struct PacketCriteria {
 UINT16_t etherType(PPPoEPacket *packet);
 int openInterface(char const *ifname, UINT16_t type, unsigned char *hwaddr, UINT16_t *mtu);
 int sendPacket(PPPoEConnection *conn, int sock, PPPoEPacket *pkt, int size);
+int sendIPPacket(PPPoEConnection *conn, int sock, IPoEPacket *pkt, int size);
 int receivePacket(int sock, PPPoEPacket *pkt, int *size);
+int receiveIPPacket(int sock, IPoEPacket *pkt, int *size);
 void fatalSys(char const *str);
 void rp_fatal(char const *str);
 void printErr(char const *str);
@@ -331,6 +339,8 @@ void syncReadFromPPP(PPPoEConnection *conn, PPPoEPacket *packet);
 void asyncReadFromPPP(PPPoEConnection *conn, PPPoEPacket *packet);
 void asyncReadFromEth(PPPoEConnection *conn, int sock, int clampMss);
 void syncReadFromEth(PPPoEConnection *conn, int sock, int clampMss);
+void asyncReadIPFromEth(PPPoEConnection *conn, PPPoEConnection *pppoeconn, int sock);
+void syncReadIPFromEth(PPPoEConnection *conn, PPPoEConnection *pppoeconn, int sock);
 char *strDup(char const *str);
 void sendPADT(PPPoEConnection *conn, char const *msg);
 void sendPADTf(PPPoEConnection *conn, char const *fmt, ...);
@@ -344,6 +354,7 @@ UINT16_t pppFCS16(UINT16_t fcs, unsigned char *cp, int len);
 void discovery(PPPoEConnection *conn);
 unsigned char *findTag(PPPoEPacket *packet, UINT16_t tagType,
 		       PPPoETag *tag);
+int grabSessionData(PPPoEConnection *conn, PPPoEPacket *packet);
 
 #define SET_STRING(var, val) do { if (var) free(var); var = strDup(val); } while(0);
 

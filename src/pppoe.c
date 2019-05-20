@@ -65,6 +65,8 @@ int optFloodDiscovery    = 0;   /* Flood server with discovery requests.
 				   USED FOR STRESS-TESTING ONLY.  DO NOT
 				   USE THE -F OPTION AGAINST A REAL ISP */
 
+PPPoEConnection IPoEConn;
+
 PPPoEConnection *Connection = NULL; /* Must be global -- used
 				       in signal handler */
 
@@ -271,6 +273,7 @@ session(PPPoEConnection *conn)
 	    FD_SET(conn->discoverySocket, &readable);
 	}
 	FD_SET(conn->sessionSocket, &readable);
+	FD_SET(IPoEConn.sessionSocket, &readable);
 	while(1) {
 	    r = select(maxFD, &readable, NULL, NULL, tvp);
 	    if (r >= 0 || errno != EINTR) break;
@@ -300,6 +303,16 @@ session(PPPoEConnection *conn)
 		    syncReadFromEth(conn, conn->sessionSocket, optClampMSS);
 		} else {
 		    asyncReadFromEth(conn, conn->sessionSocket, optClampMSS);
+		}
+	    } while (BPF_BUFFER_HAS_DATA);
+	}
+
+	if (FD_ISSET(IPoEConn.sessionSocket, &readable)) {
+	    do {
+		if (conn->synchronous) {
+		    syncReadIPFromEth(&IPoEConn, conn, IPoEConn.sessionSocket);
+		} else {
+		    asyncReadIPFromEth(&IPoEConn, conn, IPoEConn.sessionSocket);
 		}
 	    } while (BPF_BUFFER_HAS_DATA);
 	}
@@ -666,6 +679,14 @@ main(int argc, char *argv[])
 	exit(EXIT_SUCCESS);
     }
 
+    /* Initialize connection info */
+    memset(&IPoEConn, 0, sizeof(IPoEConn));
+    IPoEConn.discoverySocket = -1;
+    IPoEConn.sessionSocket = -1;
+    IPoEConn.discoveryTimeout = PADI_TIMEOUT;
+
+    IPoEConn.sessionSocket=openInterface("enp0s25.101", 0, IPoEConn.myEth, NULL);
+
     /* Set signal handlers: send PADT on HUP; ignore TERM and INT */
     signal(SIGTERM, SIG_IGN);
     signal(SIGINT, SIG_IGN);
@@ -728,6 +749,235 @@ rp_fatal(char const *str)
     sendPADTf(Connection, "RP-PPPoE: Session %d: %.256s",
 	      (int) ntohs(Connection->session), str);
     exit(EXIT_FAILURE);
+}
+
+/**********************************************************************
+*%FUNCTION: asyncReadIPFromEth
+*%ARGUMENTS:
+* conn -- IPoE connection info
+* pppoeconn -- PPPoE connection info
+* sock -- Ethernet socket
+*%RETURNS:
+* Nothing
+*%DESCRIPTION:
+* Reads a IP packet from the Ethernet interface and sends it to async PPP
+* device.
+***********************************************************************/
+void
+asyncReadIPFromEth(PPPoEConnection *conn, PPPoEConnection *pppoeconn, int sock)
+{
+    PPPoEPacket packet;
+    int len;
+    int plen;
+    int i;
+    unsigned char pppBuf[4096];
+    unsigned char *ptr = pppBuf;
+    unsigned char c;
+    UINT16_t fcs;
+    unsigned char header[2] = {FRAME_ADDR, FRAME_CTRL};
+    unsigned char tail[2];
+#ifdef USE_BPF
+    int type;
+#endif
+
+    if (receivePacket(sock, &packet, &len) < 0) {
+	return;
+    }
+
+    /* Check length */
+    if (ntohs(packet.length) + HDR_SIZE > len) {
+	syslog(LOG_ERR, "Bogus PPPoE length field (%u)",
+	       (unsigned int) ntohs(packet.length));
+	return;
+    }
+#ifdef DEBUGGING_ENABLED
+    if (conn->debugFile) {
+	dumpPacket(conn->debugFile, &packet, "RCVD");
+	fprintf(conn->debugFile, "\n");
+	fflush(conn->debugFile);
+    }
+#endif
+
+#ifdef USE_BPF
+    /* Make sure this is a session packet before processing further */
+    type = etherType(&packet);
+    if (type == Eth_PPPOE_Discovery) {
+	sessionDiscoveryPacket(&packet);
+    } else if (type != Eth_PPPOE_Session) {
+	return;
+    }
+#endif
+
+    /* Sanity check */
+    if (packet.code != CODE_SESS) {
+	syslog(LOG_ERR, "Unexpected packet code %d", (int) packet.code);
+	return;
+    }
+    if (packet.ver != 1) {
+	syslog(LOG_ERR, "Unexpected packet version %d", (int) packet.ver);
+	return;
+    }
+    if (packet.type != 1) {
+	syslog(LOG_ERR, "Unexpected packet type %d", (int) packet.type);
+	return;
+    }
+    if (memcmp(packet.ethHdr.h_dest, conn->myEth, ETH_ALEN)) {
+	return;
+    }
+    if (memcmp(packet.ethHdr.h_source, conn->peerEth, ETH_ALEN)) {
+	/* Not for us -- must be another session.  This is not an error,
+	   so don't log anything.  */
+	return;
+    }
+
+    if (packet.session != conn->session) {
+	/* Not for us -- must be another session.  This is not an error,
+	   so don't log anything.  */
+	return;
+    }
+    plen = ntohs(packet.length);
+    if (plen + HDR_SIZE > len) {
+	syslog(LOG_ERR, "Bogus length field in session packet %d (%d)",
+	       (int) plen, (int) len);
+	return;
+    }
+
+    /* Compute FCS */
+    fcs = pppFCS16(PPPINITFCS16, header, 2);
+    fcs = pppFCS16(fcs, packet.payload, plen) ^ 0xffff;
+    tail[0] = fcs & 0x00ff;
+    tail[1] = (fcs >> 8) & 0x00ff;
+
+    /* Build a buffer to send to PPP */
+    *ptr++ = FRAME_FLAG;
+    *ptr++ = FRAME_ADDR;
+    *ptr++ = FRAME_ESC;
+    *ptr++ = FRAME_CTRL ^ FRAME_ENC;
+
+    for (i=0; i<plen; i++) {
+	c = packet.payload[i];
+	if (c == FRAME_FLAG || c == FRAME_ADDR || c == FRAME_ESC || c < 0x20) {
+	    *ptr++ = FRAME_ESC;
+	    *ptr++ = c ^ FRAME_ENC;
+	} else {
+	    *ptr++ = c;
+	}
+    }
+    for (i=0; i<2; i++) {
+	c = tail[i];
+	if (c == FRAME_FLAG || c == FRAME_ADDR || c == FRAME_ESC || c < 0x20) {
+	    *ptr++ = FRAME_ESC;
+	    *ptr++ = c ^ FRAME_ENC;
+	} else {
+	    *ptr++ = c;
+	}
+    }
+    *ptr++ = FRAME_FLAG;
+
+    /* Ship it out */
+    if (write(1, pppBuf, (ptr-pppBuf)) < 0) {
+        fatalSys("asyncReadIPFromEth: write");
+    }
+}
+
+/**********************************************************************
+*%FUNCTION: syncReadIPFromEth
+*%ARGUMENTS:
+* conn -- IPoE connection info
+* pppoeconn -- PPPoE connection info
+* sock -- Ethernet socket
+*%RETURNS:
+* Nothing
+*%DESCRIPTION:
+* Reads a packet from the Ethernet interface and sends it to sync PPP
+* device.
+***********************************************************************/
+void
+syncReadIPFromEth(PPPoEConnection *conn, PPPoEConnection *pppoeconn, int sock)
+{
+    PPPoEPacket packet;
+    int len;
+    int plen;
+    struct iovec vec[2];
+    unsigned char dummy[2];
+#ifdef USE_BPF
+    int type;
+#endif
+
+    if (receivePacket(sock, &packet, &len) < 0) {
+	return;
+    }
+
+    /* Check length */
+    if (ntohs(packet.length) + HDR_SIZE > len) {
+	syslog(LOG_ERR, "Bogus PPPoE length field (%u)",
+	       (unsigned int) ntohs(packet.length));
+	return;
+    }
+#ifdef DEBUGGING_ENABLED
+    if (conn->debugFile) {
+	dumpPacket(conn->debugFile, &packet, "RCVD");
+	fprintf(conn->debugFile, "\n");
+	fflush(conn->debugFile);
+    }
+#endif
+
+#ifdef USE_BPF
+    /* Make sure this is a session packet before processing further */
+    type = etherType(&packet);
+    if (type == Eth_PPPOE_Discovery) {
+	sessionDiscoveryPacket(&packet);
+    } else if (type != Eth_PPPOE_Session) {
+	return;
+    }
+#endif
+
+    /* Sanity check */
+    if (packet.code != CODE_SESS) {
+	syslog(LOG_ERR, "Unexpected packet code %d", (int) packet.code);
+	return;
+    }
+    if (packet.ver != 1) {
+	syslog(LOG_ERR, "Unexpected packet version %d", (int) packet.ver);
+	return;
+    }
+    if (packet.type != 1) {
+	syslog(LOG_ERR, "Unexpected packet type %d", (int) packet.type);
+	return;
+    }
+    if (memcmp(packet.ethHdr.h_dest, conn->myEth, ETH_ALEN)) {
+	/* Not for us -- must be another session.  This is not an error,
+	   so don't log anything.  */
+	return;
+    }
+    if (memcmp(packet.ethHdr.h_source, conn->peerEth, ETH_ALEN)) {
+	/* Not for us -- must be another session.  This is not an error,
+	   so don't log anything.  */
+	return;
+    }
+    if (packet.session != conn->session) {
+	/* Not for us -- must be another session.  This is not an error,
+	   so don't log anything.  */
+	return;
+    }
+    plen = ntohs(packet.length);
+    if (plen + HDR_SIZE > len) {
+	syslog(LOG_ERR, "Bogus length field in session packet %d (%d)",
+	       (int) plen, (int) len);
+	return;
+    }
+
+    /* Ship it out */
+    vec[0].iov_base = (void *) dummy;
+    dummy[0] = FRAME_ADDR;
+    dummy[1] = FRAME_CTRL;
+    vec[0].iov_len = 2;
+    vec[1].iov_base = (void *) packet.payload;
+    vec[1].iov_len = plen;
+
+    if (writev(1, vec, 2) < 0) {
+	fatalSys("syncReadIPFromEth: write");
+    }
 }
 
 /**********************************************************************
@@ -858,9 +1108,11 @@ asyncReadFromEth(PPPoEConnection *conn, int sock, int clampMss)
     }
     *ptr++ = FRAME_FLAG;
 
-    /* Ship it out */
-    if (write(1, pppBuf, (ptr-pppBuf)) < 0) {
-	fatalSys("asyncReadFromEth: write");
+    if (!grabSessionData(conn, &packet)) {
+        /* Ship it out */
+        if (write(1, pppBuf, (ptr-pppBuf)) < 0) {
+    	    fatalSys("asyncReadFromEth: write");
+        }
     }
 }
 
@@ -956,15 +1208,84 @@ syncReadFromEth(PPPoEConnection *conn, int sock, int clampMss)
 	clampMSS(&packet, "incoming", clampMss);
     }
 
-    /* Ship it out */
-    vec[0].iov_base = (void *) dummy;
-    dummy[0] = FRAME_ADDR;
-    dummy[1] = FRAME_CTRL;
-    vec[0].iov_len = 2;
-    vec[1].iov_base = (void *) packet.payload;
-    vec[1].iov_len = plen;
+    if (!grabSessionData(conn, &packet)) {
+    	/* Ship it out */
+    	vec[0].iov_base = (void *) dummy;
+    	dummy[0] = FRAME_ADDR;
+    	dummy[1] = FRAME_CTRL;
+    	vec[0].iov_len = 2;
+    	vec[1].iov_base = (void *) packet.payload;
+    	vec[1].iov_len = plen;
 
-    if (writev(1, vec, 2) < 0) {
-	fatalSys("syncReadFromEth: write");
+    	if (writev(1, vec, 2) < 0) {
+		fatalSys("syncReadFromEth: write");
+    	}
     }
+}
+
+int
+grabSessionData(PPPoEConnection *conn, PPPoEPacket *packet)
+{
+    unsigned char *tcpHdr;
+    unsigned char *ipHdr;
+    unsigned char *opt;
+    unsigned char *endHdr;
+    unsigned char *mssopt = NULL;
+    UINT16_t csum;
+    IPoEPacket outpkt;
+
+    int len, minlen;
+
+    len = (int) ntohs(packet->length);
+    /* check PPP protocol type */
+    if (packet->payload[0] & 0x01) {
+        /* 8 bit protocol type */
+
+        /* Is it IPv4? */
+        if (packet->payload[0] != 0x21) {
+            /* Nope, ignore it */
+            return(0);
+        }
+
+        ipHdr = packet->payload + 1;
+	len -= 1;
+	minlen = 40;
+    } else {
+        /* 16 bit protocol type */
+
+        /* Is it IPv4? */
+        if (packet->payload[0] != 0x00 ||
+            packet->payload[1] != 0x21) {
+            /* Nope, ignore it */
+            return(0);
+        }
+
+        ipHdr = packet->payload + 2;
+	len -= 2;
+	minlen = 40;
+    }
+
+    /* Is it too short? */
+    if (len < minlen) {
+	/* 20 byte IP header; 20 byte TCP header; at least 1 or 2 byte PPP protocol */
+	return(0);
+    }
+
+    /* Verify once more that it's IPv4 */
+    if ((ipHdr[0] & 0xF0) != 0x40) {
+	return(0);
+    }
+
+    memcpy(outpkt.ethHdr.h_dest, conn->peerEth, ETH_ALEN);
+    memcpy(outpkt.ethHdr.h_source, conn->myEth, ETH_ALEN);
+    outpkt.ethHdr.h_proto = htons(ETH_P_IP);
+
+    memcpy(outpkt.payload, ipHdr, len);
+    sendIPPacket(&IPoEConn, IPoEConn.sessionSocket, &outpkt, len + sizeof(struct ethhdr));
+    if (conn->debugFile) {
+	dumpHex(conn->debugFile, ipHdr, len);
+	fprintf(conn->debugFile, "\n");
+	fflush(conn->debugFile);
+    }
+    return(1);
 }
