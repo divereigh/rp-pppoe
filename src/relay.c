@@ -822,7 +822,7 @@ relayGotDiscoveryPacket(PPPoEInterface const *iface)
     PPPoEPacket packet;
     int size;
 
-    if (receivePacket(iface->discoverySock, &packet, &size) < 0) {
+    if (receivePacket(iface->discoverySock, (EthPacket *) &packet, &size) < 0) {
 	return;
     }
     /* Ignore unknown code/version */
@@ -881,7 +881,7 @@ relayGotSessionPacket(PPPoEInterface const *iface)
     SessionHash *sh;
     PPPoESession *ses;
 
-    if (receivePacket(iface->sessionSock, &packet, &size) < 0) {
+    if (receivePacket(iface->sessionSock, (EthPacket *) &packet, &size) < 0) {
 	return;
     }
 

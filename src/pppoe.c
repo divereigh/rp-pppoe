@@ -167,7 +167,7 @@ sessionDiscoveryPacket(PPPoEConnection *conn)
     PPPoEPacket packet;
     int len;
 
-    if (receivePacket(conn->discoverySocket, &packet, &len) < 0) {
+    if (receivePacket(conn->discoverySocket, (EthPacket *) &packet, &len) < 0) {
 	return;
     }
 
@@ -765,10 +765,10 @@ rp_fatal(char const *str)
 void
 readIPFromEth(PPPoEConnection *conn, PPPoEConnection *pppoeconn, int sock, PPPoEPacket *packet)
 {
-    IPoEPacket ippacket;
+    EthPacket ippacket;
     int len;
 
-    if (receiveIPPacket(sock, &ippacket, &len) < 0) {
+    if (receivePacket(sock, &ippacket, &len) < 0) {
 	return;
     }
 
@@ -809,7 +809,7 @@ asyncReadFromEth(PPPoEConnection *conn, int sock, int clampMss)
     int type;
 #endif
 
-    if (receivePacket(sock, &packet, &len) < 0) {
+    if (receivePacket(sock, (EthPacket *) &packet, &len) < 0) {
 	return;
     }
 
@@ -940,7 +940,7 @@ syncReadFromEth(PPPoEConnection *conn, int sock, int clampMss)
     int type;
 #endif
 
-    if (receivePacket(sock, &packet, &len) < 0) {
+    if (receivePacket(sock, (EthPacket *) &packet, &len) < 0) {
 	return;
     }
 
@@ -1026,13 +1026,13 @@ syncReadFromEth(PPPoEConnection *conn, int sock, int clampMss)
 int
 grabSessionData(PPPoEConnection *conn, PPPoEPacket *packet)
 {
-    unsigned char *tcpHdr;
+    // unsigned char *tcpHdr;
     unsigned char *ipHdr;
-    unsigned char *opt;
-    unsigned char *endHdr;
-    unsigned char *mssopt = NULL;
-    UINT16_t csum;
-    IPoEPacket outpkt;
+    // unsigned char *opt;
+    // unsigned char *endHdr;
+    // unsigned char *mssopt = NULL;
+    // UINT16_t csum;
+    EthPacket outpkt;
 
     int len, minlen;
 

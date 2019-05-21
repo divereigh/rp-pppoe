@@ -59,6 +59,10 @@ extern int IsSetID;
 #include <net/if_dl.h>
 #endif
 
+#ifdef HAVE_NET_IF_ARP_H
+#include <net/if_arp.h>
+#endif
+
 /* I'm not sure why this is needed... I do not have OpenBSD */
 #if defined(__OpenBSD__)
 #include <net/ppp_defs.h>
@@ -232,12 +236,6 @@ typedef struct PPPoEPacketStruct {
     unsigned char payload[ETH_JUMBO_LEN]; /* A bit of room to spare */
 } PPPoEPacket;
 
-/* An IPv4 Packet, including Ethernet headers */
-typedef struct IPoEPacketStruct {
-    struct ethhdr ethHdr;	/* Ethernet header */
-    unsigned char payload[ETH_JUMBO_LEN]; /* A bit of room to spare */
-} IPoEPacket;
-
 /* Header size of a PPPoE packet */
 #define PPPOE_OVERHEAD 6  /* type, code, session, length */
 #define HDR_SIZE (sizeof(struct ethhdr) + PPPOE_OVERHEAD)
@@ -248,6 +246,12 @@ typedef struct IPoEPacketStruct {
 
 /* Normal PPPoE MTU without jumbo frames */
 #define ETH_PPPOE_MTU (ETH_DATA_LEN - TOTAL_OVERHEAD)
+
+/* An EtherNet Packet, including Ethernet headers */
+typedef struct EthPacketStruct {
+    struct ethhdr ethHdr;	/* Ethernet header */
+    unsigned char payload[ETH_JUMBO_LEN+PPPOE_OVERHEAD]; /* A bit of room to spare (plus the PPPoE Header)*/
+} EthPacket;
 
 /* PPPoE Tag */
 
@@ -321,9 +325,9 @@ struct PacketCriteria {
 UINT16_t etherType(PPPoEPacket *packet);
 int openInterface(char const *ifname, UINT16_t type, unsigned char *hwaddr, UINT16_t *mtu);
 int sendPacket(PPPoEConnection *conn, int sock, PPPoEPacket *pkt, int size);
-int sendIPPacket(PPPoEConnection *conn, int sock, IPoEPacket *pkt, int size);
-int receivePacket(int sock, PPPoEPacket *pkt, int *size);
-int receiveIPPacket(int sock, IPoEPacket *pkt, int *size);
+int sendIPPacket(PPPoEConnection *conn, int sock, EthPacket *pkt, int size);
+int receivePacket(int sock, EthPacket *pkt, int *size);
+int receiveIPPacket(int sock, EthPacket *pkt, int *size);
 void fatalSys(char const *str);
 void rp_fatal(char const *str);
 void printErr(char const *str);

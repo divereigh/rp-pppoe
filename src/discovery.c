@@ -445,7 +445,7 @@ waitForPADO(PPPoEConnection *conn, int timeout)
 	}
 
 	/* Get the packet */
-	receivePacket(conn->discoverySocket, &packet, &len);
+	receivePacket(conn->discoverySocket, (EthPacket *) &packet, &len);
 
 	/* Check length */
 	if (ntohs(packet.length) + HDR_SIZE > len) {
@@ -683,7 +683,7 @@ waitForPADS(PPPoEConnection *conn, int timeout)
 	}
 
 	/* Get the packet */
-	receivePacket(conn->discoverySocket, &packet, &len);
+	receivePacket(conn->discoverySocket, (EthPacket *) &packet, &len);
 
 	/* Check length */
 	if (ntohs(packet.length) + HDR_SIZE > len) {

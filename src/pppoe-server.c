@@ -1774,7 +1774,7 @@ serverProcessPacket(Interface *i)
     PPPoEPacket packet;
     int sock = i->sock;
 
-    if (receivePacket(sock, &packet, &len) < 0) {
+    if (receivePacket(sock, (EthPacket *) &packet, &len) < 0) {
 	return;
     }
 

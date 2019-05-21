@@ -201,7 +201,7 @@ main(int argc, char *argv[])
        ensure this */
     fprintf(stderr, "Sniffing for PADR.  Start your connection on another machine...\n");
     while (!SeenPADR) {
-	if (receivePacket(sock, &pkt, &size) < 0) continue;
+	if (receivePacket(sock, (EthPacket *) &pkt, &size) < 0) continue;
 	if (ntohs(pkt.length) + HDR_SIZE > size) continue;
 	if (pkt.ver != 1 || pkt.type != 1)       continue;
 	if (pkt.code != CODE_PADR)               continue;
@@ -216,7 +216,7 @@ main(int argc, char *argv[])
     }
 
     while (!SeenSess) {
-	if (receivePacket(sock, &pkt, &size) < 0) continue;
+	if (receivePacket(sock, (EthPacket *) &pkt, &size) < 0) continue;
 	if (ntohs(pkt.length) + HDR_SIZE > size) continue;
 	if (pkt.ver != 1 || pkt.type != 1)       continue;
 	if (pkt.code != CODE_SESS)               continue;
