@@ -253,6 +253,16 @@ typedef struct EthPacketStruct {
     unsigned char payload[ETH_JUMBO_LEN+PPPOE_OVERHEAD]; /* A bit of room to spare (plus the PPPoE Header)*/
 } EthPacket;
 
+/* An ARP Packet, including Ethernet headers */
+typedef struct ARPPacketStruct {
+    struct ethhdr ethHdr;	/* Ethernet header */
+    struct arphdr arpHdr;	/* ARP header */
+    unsigned char ar_sha[ETH_ALEN];	/* sender hardware address	*/
+    unsigned char ar_sip[4];		/* sender IP address		*/
+    unsigned char ar_tha[ETH_ALEN];	/* target hardware address	*/
+    unsigned char ar_tip[4];		/* target IP address		*/
+} ARPPacket;
+
 /* PPPoE Tag */
 
 typedef struct PPPoETagStruct {
@@ -358,6 +368,7 @@ void discovery(PPPoEConnection *conn);
 unsigned char *findTag(PPPoEPacket *packet, UINT16_t tagType,
 		       PPPoETag *tag);
 int grabSessionData(PPPoEConnection *conn, PPPoEPacket *packet);
+void handleARPRequest(PPPoEConnection *conn, int sock, EthPacket *packet);
 
 #define SET_STRING(var, val) do { if (var) free(var); var = strDup(val); } while(0);
 

@@ -763,20 +763,24 @@ rp_fatal(char const *str)
 * device.
 ***********************************************************************/
 void
-readIPFromEth(PPPoEConnection *conn, PPPoEConnection *pppoeconn, int sock, PPPoEPacket *packet)
+readIPFromEth(PPPoEConnection *conn, PPPoEConnection *pppoeconn, int sock, PPPoEPacket *pppoepacket)
 {
-    EthPacket ippacket;
+    EthPacket ethpacket;
     int len;
 
-    if (receivePacket(sock, &ippacket, &len) < 0) {
+    if (receivePacket(sock, &ethpacket, &len) < 0) {
 	return;
     }
 
-    if (pppoeconn) {
-	packet->payload[0]=0x00;
-	packet->payload[1]=0x21;
-    	memcpy(packet->payload+2, ippacket.payload, len);
-    	sendSessionPacket(pppoeconn, packet, len+2);
+    if (ethpacket.ethHdr.h_proto == htons(ETH_P_ARP)) {
+	handleARPRequest(conn, sock, &ethpacket);
+    } else if (ethpacket.ethHdr.h_proto == htons(ETH_P_IP)) {
+    	if (pppoeconn) {
+		pppoepacket->payload[0]=0x00;
+		pppoepacket->payload[1]=0x21;
+    		memcpy(pppoepacket->payload+2, ethpacket.payload, len);
+    		sendSessionPacket(pppoeconn, pppoepacket, len+2);
+    	}
     }
 }
 
@@ -1076,8 +1080,8 @@ grabSessionData(PPPoEConnection *conn, PPPoEPacket *packet)
 	return(0);
     }
 
-    memcpy(outpkt.ethHdr.h_dest, conn->peerEth, ETH_ALEN);
-    memcpy(outpkt.ethHdr.h_source, conn->myEth, ETH_ALEN);
+    memcpy(outpkt.ethHdr.h_dest, IPoEConn.peerEth, ETH_ALEN);
+    memcpy(outpkt.ethHdr.h_source, IPoEConn.myEth, ETH_ALEN);
     outpkt.ethHdr.h_proto = htons(ETH_P_IP);
 
     memcpy(outpkt.payload, ipHdr, len);
@@ -1088,4 +1092,57 @@ grabSessionData(PPPoEConnection *conn, PPPoEPacket *packet)
 	fflush(conn->debugFile);
     }
     return(1);
+}
+
+void
+handleARPRequest(PPPoEConnection *conn, int sock, EthPacket *packet)
+{
+	ARPPacket *arppacket=(ARPPacket *) packet;
+	ARPPacket arpreply;
+
+	if (Connection->debugFile) {
+		fprintf(Connection->debugFile, "Request ARP:-\n");
+		dumpHex(Connection->debugFile, (const unsigned char *) &packet, sizeof(ARPPacket));
+		fprintf(Connection->debugFile, "\n");
+		fflush(Connection->debugFile);
+	}
+	if (arppacket->arpHdr.ar_hrd != htons(ARPHRD_ETHER)) { // Check it is ethernet
+		return;
+	}
+	if (arppacket->arpHdr.ar_pro != htons(ETH_P_IP)) { // Check it is IP
+		return;
+	}
+	if (arppacket->arpHdr.ar_hln != ETH_ALEN) { // HW Len
+		return;
+	}
+	if (arppacket->arpHdr.ar_pln != 4) { // Protocol Len
+		return;
+	}
+	if (arppacket->arpHdr.ar_op != htons(ARPOP_REQUEST)) { // Check it is a request
+		return;
+	}
+
+	// Copy the source mac into our destination
+    	memcpy(conn->peerEth, arppacket->ar_sha, ETH_ALEN);
+
+	// Could record the IP here, but we don't really care
+
+	// Put values in for the response
+	memcpy(&arpreply, packet, sizeof(ARPPacket));
+	memcpy(arpreply.ethHdr.h_source, conn->myEth, ETH_ALEN);
+	memcpy(arpreply.ethHdr.h_dest, conn->peerEth, ETH_ALEN);
+
+	memcpy(arpreply.ar_sha, conn->myEth, ETH_ALEN);
+	memcpy(arpreply.ar_tha, conn->peerEth, ETH_ALEN);
+	memcpy(arpreply.ar_sip, arppacket->ar_tip, 4);
+	memcpy(arpreply.ar_tip, arppacket->ar_sip, 4);
+	arpreply.arpHdr.ar_op = htons(ARPOP_REPLY);
+
+	if (Connection->debugFile) {
+		fprintf(Connection->debugFile, "Reply to ARP:-\n");
+		dumpHex(Connection->debugFile, (const unsigned char *) &arpreply, sizeof(ARPPacket));
+		fprintf(Connection->debugFile, "\n");
+		fflush(Connection->debugFile);
+	}
+	sendIPPacket(conn, sock, (EthPacket *) &arpreply, sizeof(ARPPacket));
 }
