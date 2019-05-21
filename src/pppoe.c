@@ -68,6 +68,12 @@ int optFloodDiscovery    = 0;   /* Flood server with discovery requests.
 
 PPPoEConnection IPoEConn;
 
+#define USE_CIDR 24
+
+struct in_addr peerIP;
+struct in_addr gatewayIP;
+struct in_addr netmaskIP;
+
 PPPoEConnection *Connection = NULL; /* Must be global -- used
 				       in signal handler */
 
@@ -1033,61 +1039,47 @@ grabSessionData(PPPoEConnection *conn, PPPoEPacket *packet)
     // unsigned char *mssopt = NULL;
     // UINT16_t csum;
     EthPacket outpkt;
+    UINT16_t protocoltype;
 
-    int len, minlen;
+    int len;
 
     len = (int) ntohs(packet->length);
+    memcpy(&protocoltype, packet->payload, 2);
+    ipHdr=packet->payload+2;
     /* check PPP protocol type */
-    if (packet->payload[0] & 0x01) {
-        /* 8 bit protocol type */
+    if (protocoltype == htons(PPPIP)) {
 
-        /* Is it IPv4? */
-        if (packet->payload[0] != 0x21) {
-            /* Nope, ignore it */
-            return(0);
-        }
+	/* Verify once more that it's IPv4 */
+	if ((ipHdr[0] & 0xF0) != 0x40) {
+	    return(0);
+	}
 
-        ipHdr = packet->payload + 1;
-	len -= 1;
-	minlen = 40;
-    } else {
-        /* 16 bit protocol type */
+	memcpy(outpkt.ethHdr.h_dest, IPoEConn.peerEth, ETH_ALEN);
+	memcpy(outpkt.ethHdr.h_source, IPoEConn.myEth, ETH_ALEN);
+	outpkt.ethHdr.h_proto = htons(ETH_P_IP);
 
-        /* Is it IPv4? */
-        if (packet->payload[0] != 0x00 ||
-            packet->payload[1] != 0x21) {
-            /* Nope, ignore it */
-            return(0);
-        }
-
-        ipHdr = packet->payload + 2;
-	len -= 2;
-	minlen = 40;
+	memcpy(outpkt.payload, ipHdr, len-2);
+	sendIPPacket(&IPoEConn, IPoEConn.sessionSocket, &outpkt, len + sizeof(struct ethhdr));
+	if (conn->debugFile) {
+	    dumpHex(conn->debugFile, ipHdr, len-2);
+	    fprintf(conn->debugFile, "\n");
+	    fflush(conn->debugFile);
+	}
+	return(1);
+    } else if (protocoltype == htons(PPPIPCP)) {
+	// Look for an ACK from upstream for the IP address
+	if (packet->payload[2] != 0x02) { // Config ACK
+		return(0);
+	}
+	if (packet->payload[6] != 0x03 || packet->payload[7] != 0x06) { // IP Address
+		return(0);
+	}
+	memcpy(&peerIP.s_addr, packet->payload + 8, sizeof(peerIP.s_addr));
+	netmaskIP.s_addr=htonl(~(0xffffffff >> USE_CIDR));
+	gatewayIP.s_addr=peerIP.s_addr & netmaskIP.s_addr;
+	gatewayIP.s_addr=htonl(ntohl(gatewayIP.s_addr)+1);
     }
-
-    /* Is it too short? */
-    if (len < minlen) {
-	/* 20 byte IP header; 20 byte TCP header; at least 1 or 2 byte PPP protocol */
-	return(0);
-    }
-
-    /* Verify once more that it's IPv4 */
-    if ((ipHdr[0] & 0xF0) != 0x40) {
-	return(0);
-    }
-
-    memcpy(outpkt.ethHdr.h_dest, IPoEConn.peerEth, ETH_ALEN);
-    memcpy(outpkt.ethHdr.h_source, IPoEConn.myEth, ETH_ALEN);
-    outpkt.ethHdr.h_proto = htons(ETH_P_IP);
-
-    memcpy(outpkt.payload, ipHdr, len);
-    sendIPPacket(&IPoEConn, IPoEConn.sessionSocket, &outpkt, len + sizeof(struct ethhdr));
-    if (conn->debugFile) {
-	dumpHex(conn->debugFile, ipHdr, len);
-	fprintf(conn->debugFile, "\n");
-	fflush(conn->debugFile);
-    }
-    return(1);
+    return(0);
 }
 
 void

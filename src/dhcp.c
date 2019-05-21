@@ -8,6 +8,9 @@
 */
 
 extern PPPoEConnection *Connection;
+extern struct in_addr peerIP;
+extern struct in_addr gatewayIP;
+extern struct in_addr netmaskIP;
 
 uint16_t ip_checksum(void* vdata,size_t length) {
     // Cast the data pointer to one that can be indexed.
@@ -49,25 +52,25 @@ isdhcp(EthPacket *ethpacket, int len)
 
     /* Verify once more that it's IPv4 */
     if (bootpreq->iph.version != 4) {
-	fprintf(stderr, "IP4 check failed: %d\n", bootpreq->iph.version);
+	// fprintf(stderr, "IP4 check failed: %d\n", bootpreq->iph.version);
 	return(0);
     }
 
     /* Is it a fragment that's not at the beginning of the packet? */
     if (bootpreq->iph.frag_off) {
 	/* Yup, don't touch! */
-	fprintf(stderr, "Frag check failed: %d\n", bootpreq->iph.frag_off);
+	// fprintf(stderr, "Frag check failed: %d\n", bootpreq->iph.frag_off);
 	return(0);
     }
 
     /* Is it UDP? */
     if (bootpreq->iph.protocol != 0x11) {
-	fprintf(stderr, "protocol check failed: %d\n", bootpreq->iph.protocol);
+	// fprintf(stderr, "protocol check failed: %d\n", bootpreq->iph.protocol);
 	return(0);
     }
 
     if (bootpreq->udph.source != htons(68) || bootpreq->udph.dest != htons(67)) {
-	fprintf(stderr, "port check failed: src %d - dest %d\n", ntohs(bootpreq->udph.source), ntohs(bootpreq->udph.dest));
+	// fprintf(stderr, "port check failed: src %d - dest %d\n", ntohs(bootpreq->udph.source), ntohs(bootpreq->udph.dest));
 	return(0);
     }
 
@@ -189,8 +192,8 @@ handleDHCPRequest(PPPoEConnection *conn, int sock, EthPacket *ethpacket, int len
 		memcpy(&(bootpreply->xid), &(bootpreq->xid), 4);
 		bootpreply->flags=bootpreq->flags;
 		memset(&(bootpreply->client_ip), 0, 4);
-		inet_pton(AF_INET, YOURIP, &(bootpreply->your_ip));
-		inet_pton(AF_INET, MYIP, &(bootpreply->server_ip));
+		memcpy(&(bootpreply->your_ip), &peerIP, sizeof(peerIP));
+		memcpy(&(bootpreply->server_ip), &gatewayIP, sizeof(gatewayIP));
 		memset(&(bootpreply->relay_ip), 0, 4);
 		memcpy(bootpreply->hw_addr, ethpacket->ethHdr.h_source, ETH_ALEN);
 		memset(bootpreply->serv_name, 0, sizeof(bootpreply->serv_name));
@@ -211,17 +214,14 @@ handleDHCPRequest(PPPoEConnection *conn, int sock, EthPacket *ethpacket, int len
 			addDHCPOption(&optptr, DHO_DHCP_MESSAGE_TYPE, buf, 1);
 		}
 
-		inet_pton(AF_INET, MYIP, buf);
-		addDHCPOption(&optptr, DHO_DHCP_SERVER_IDENTIFIER, buf, 4);
+		addDHCPOption(&optptr, DHO_DHCP_SERVER_IDENTIFIER, (unsigned char *) &gatewayIP, 4);
 
 		tmpval=htonl(5*60);
 		addDHCPOption(&optptr, DHO_DHCP_LEASE_TIME, (unsigned char *) &tmpval, 4);
 
-		inet_pton(AF_INET, "255.255.255.0", buf);
-		addDHCPOption(&optptr, DHO_SUBNET, buf, 4);
+		addDHCPOption(&optptr, DHO_SUBNET, (unsigned char *) &netmaskIP, 4);
 
-		inet_pton(AF_INET, MYIP, buf);
-		addDHCPOption(&optptr, DHO_ROUTERS, buf, 4);
+		addDHCPOption(&optptr, DHO_ROUTERS, (unsigned char *) &gatewayIP, 4);
 
 		inet_pton(AF_INET, "8.8.8.8", buf);
 		addDHCPOption(&optptr, DHO_DOMAIN_NAME_SERVERS, buf, 4);

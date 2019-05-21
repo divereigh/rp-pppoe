@@ -387,4 +387,15 @@ do {\
 #define NOT_UNICAST(e) ((e[0] & 0x01) != 0)
 #define BROADCAST(e) ((e[0] & e[1] & e[2] & e[3] & e[4] & e[5]) == 0xFF)
 #define NOT_BROADCAST(e) ((e[0] & e[1] & e[2] & e[3] & e[4] & e[5]) != 0xFF)
+
+#define PPPPAP		0xC023
+#define PPPCHAP		0xC223
+#define PPPLCP		0xC021
+#define PPPIPCP		0x8021
+#define PPPIPV6CP	0x8057
+#define PPPCCP		0x80FD
+#define PPPIP		0x0021
+#define PPPIPV6		0x0057
+#define PPPMP		0x003D
+
 #endif
