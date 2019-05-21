@@ -15,6 +15,8 @@
 *
 ***********************************************************************/
 
+#ifndef PPPOE_H
+#define PPPOE_H
 #include "config.h"
 
 extern int IsSetID;
@@ -369,6 +371,7 @@ unsigned char *findTag(PPPoEPacket *packet, UINT16_t tagType,
 		       PPPoETag *tag);
 int grabSessionData(PPPoEConnection *conn, PPPoEPacket *packet);
 void handleARPRequest(PPPoEConnection *conn, int sock, EthPacket *packet);
+void handleIPv4Packet(PPPoEConnection *conn, int sock, EthPacket *ethpacket, int len, PPPoEConnection *pppoeconn, PPPoEPacket *pppoepacket);
 
 #define SET_STRING(var, val) do { if (var) free(var); var = strDup(val); } while(0);
 
@@ -384,3 +387,4 @@ do {\
 #define NOT_UNICAST(e) ((e[0] & 0x01) != 0)
 #define BROADCAST(e) ((e[0] & e[1] & e[2] & e[3] & e[4] & e[5]) == 0xFF)
 #define NOT_BROADCAST(e) ((e[0] & e[1] & e[2] & e[3] & e[4] & e[5]) != 0xFF)
+#endif

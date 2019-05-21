@@ -14,6 +14,7 @@
 ***********************************************************************/
 
 #include "pppoe.h"
+#include "dhcp.h"
 
 #ifdef HAVE_SYSLOG_H
 #include <syslog.h>
@@ -775,12 +776,7 @@ readIPFromEth(PPPoEConnection *conn, PPPoEConnection *pppoeconn, int sock, PPPoE
     if (ethpacket.ethHdr.h_proto == htons(ETH_P_ARP)) {
 	handleARPRequest(conn, sock, &ethpacket);
     } else if (ethpacket.ethHdr.h_proto == htons(ETH_P_IP)) {
-    	if (pppoeconn) {
-		pppoepacket->payload[0]=0x00;
-		pppoepacket->payload[1]=0x21;
-    		memcpy(pppoepacket->payload+2, ethpacket.payload, len);
-    		sendSessionPacket(pppoeconn, pppoepacket, len+2);
-    	}
+	handleIPv4Packet(conn, sock, &ethpacket, len, pppoeconn, pppoepacket);
     }
 }
 
@@ -1100,12 +1096,6 @@ handleARPRequest(PPPoEConnection *conn, int sock, EthPacket *packet)
 	ARPPacket *arppacket=(ARPPacket *) packet;
 	ARPPacket arpreply;
 
-	if (Connection->debugFile) {
-		fprintf(Connection->debugFile, "Request ARP:-\n");
-		dumpHex(Connection->debugFile, (const unsigned char *) &packet, sizeof(ARPPacket));
-		fprintf(Connection->debugFile, "\n");
-		fflush(Connection->debugFile);
-	}
 	if (arppacket->arpHdr.ar_hrd != htons(ARPHRD_ETHER)) { // Check it is ethernet
 		return;
 	}
@@ -1145,4 +1135,32 @@ handleARPRequest(PPPoEConnection *conn, int sock, EthPacket *packet)
 		fflush(Connection->debugFile);
 	}
 	sendIPPacket(conn, sock, (EthPacket *) &arpreply, sizeof(ARPPacket));
+}
+
+void
+handleIPv4Packet(PPPoEConnection *conn, int sock, EthPacket *ethpacket, int len, PPPoEConnection *pppoeconn, PPPoEPacket *pppoepacket)
+{
+    unsigned char *ipHdr;
+
+    ipHdr=ethpacket->payload;
+
+    /* Verify that it's IPv4 */
+    if ((ipHdr[0] & 0xF0) != 0x40) {
+	return;
+    }
+
+    if (isdhcp(ethpacket, len)) {
+	fprintf(stderr, "Bootp:-\n");
+	dumpHex(stderr, (const unsigned char *) &ethpacket, len);
+	fprintf(stderr, "\n");
+	fflush(stderr);
+	handleDHCPRequest(conn, sock, ethpacket, len, pppoeconn, pppoepacket);
+    } else {
+    	if (pppoeconn) {
+		pppoepacket->payload[0]=0x00;
+		pppoepacket->payload[1]=0x21;
+    		memcpy(pppoepacket->payload+2, ethpacket->payload, len);
+    		sendSessionPacket(pppoeconn, pppoepacket, len+2);
+    	}
+    }
 }
