@@ -165,4 +165,7 @@ struct dhcp_option
 
 int isdhcp(EthPacket *ethpacket, int len);
 void handleDHCPRequest(IPoEConnection *conn, int sock, EthPacket *ethpacket, int len, PPPoEConnection *pppoeconn, PPPoEPacket *pppoepacket);
+void handleARPRequest(IPoEConnection *conn, int sock, EthPacket *packet);
+void handleIPv4Packet(IPoEConnection *conn, int sock, EthPacket *ethpacket, int len, PPPoEConnection *pppoeconn, PPPoEPacket *pppoepacket);
+void readIPFromEth(IPoEConnection *ipoeconn, int sock, PPPoEConnection *pppoeconn, PPPoEPacket *packet);
 #endif

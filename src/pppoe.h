@@ -325,36 +325,15 @@ typedef struct PPPoEConnectionStruct {
 
 typedef struct IPoEConnectionStruct {
     int discoveryState;		/* Where we are in discovery */
-    int discoverySocket;	/* Raw socket for discovery frames */
     int sessionSocket;		/* Raw socket for session frames */
     unsigned char myEth[ETH_ALEN]; /* My MAC address */
     unsigned char peerEth[ETH_ALEN]; /* Peer's MAC address */
-#ifdef PLUGIN
-    unsigned char req_peer_mac[ETH_ALEN]; /* required peer MAC address */
-    unsigned char req_peer;     /* require mac addr to match req_peer_mac */
-#endif
-
-    UINT16_t session;		/* Session ID */
+    time_t lastarp;		/* Time we last got an arp/dhcp */
+    time_t lastdhcp;		/* Time we last got a DHCP lease */
     char *ifName;		/* Interface name */
-    char *serviceName;		/* Desired service name, if any */
-    char *acName;		/* Desired AC name, if any */
-    int synchronous;		/* Use synchronous PPP */
-    char *hostUniq;		/* Host-Uniq tag, if any */
-    int printACNames;		/* Just print AC names */
-    int skipDiscovery;		/* Skip discovery */
-    int noDiscoverySocket;	/* Don't even open discovery socket */
-    int killSession;		/* Kill session and exit */
-    FILE *debugFile;		/* Debug file for dumping packets */
-    int numPADOs;		/* Number of PADO packets received */
-    PPPoETag cookie;		/* We have to send this if we get it */
-    PPPoETag relayId;		/* Ditto */
-    int PADSHadError;           /* If PADS had an error tag */
-    int discoveryTimeout;       /* Timeout for discovery packets */
-#ifdef PLUGIN
-    int seenMaxPayload;
-    int mtu;
-    int mru;
-#endif
+    struct in_addr peerIP;	/* Peer IP address from PPP */
+    struct in_addr gatewayIP;	/* Manufactured gateway */
+    struct in_addr netmaskIP;	/* Manufactured netmask */
 } IPoEConnection;
 
 /* Structure used to determine acceptable PADO or PADS packet */
@@ -389,7 +368,6 @@ void syncReadFromPPP(PPPoEConnection *conn, PPPoEPacket *packet);
 void asyncReadFromPPP(PPPoEConnection *conn, PPPoEPacket *packet);
 void asyncReadFromEth(PPPoEConnection *conn, int sock, IPoEConnection *ipoeconn, int clampMss);
 void syncReadFromEth(PPPoEConnection *conn, int sock, IPoEConnection *ipoeconn, int clampMss);
-void readIPFromEth(IPoEConnection *ipoeconn, int sock, PPPoEConnection *pppoeconn, PPPoEPacket *packet);
 char *strDup(char const *str);
 void sendPADT(PPPoEConnection *conn, char const *msg);
 void sendPADTf(PPPoEConnection *conn, char const *fmt, ...);
@@ -404,8 +382,6 @@ void discovery(PPPoEConnection *conn);
 unsigned char *findTag(PPPoEPacket *packet, UINT16_t tagType,
 		       PPPoETag *tag);
 int divertPPPoESessionData(IPoEConnection *conn, PPPoEPacket *packet);
-void handleARPRequest(IPoEConnection *conn, int sock, EthPacket *packet);
-void handleIPv4Packet(IPoEConnection *conn, int sock, EthPacket *ethpacket, int len, PPPoEConnection *pppoeconn, PPPoEPacket *pppoepacket);
 
 #define SET_STRING(var, val) do { if (var) free(var); var = strDup(val); } while(0);
 

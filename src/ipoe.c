@@ -1,4 +1,4 @@
-#include "dhcp.h"
+#include "ipoe.h"
 
 #include <arpa/inet.h>
 #include <string.h>
@@ -8,9 +8,6 @@
 */
 
 extern PPPoEConnection *Connection;
-extern struct in_addr peerIP;
-extern struct in_addr gatewayIP;
-extern struct in_addr netmaskIP;
 
 uint16_t ip_checksum(void* vdata,size_t length) {
     // Cast the data pointer to one that can be indexed.
@@ -43,6 +40,76 @@ uint16_t ip_checksum(void* vdata,size_t length) {
     return htons(~acc);
 }
 
+void
+handleARPRequest(IPoEConnection *conn, int sock, EthPacket *packet)
+{
+	ARPPacket *arppacket=(ARPPacket *) packet;
+	ARPPacket arpreply;
+
+	if (arppacket->arpHdr.ar_hrd != htons(ARPHRD_ETHER)) { // Check it is ethernet
+		return;
+	}
+	if (arppacket->arpHdr.ar_pro != htons(ETH_P_IP)) { // Check it is IP
+		return;
+	}
+	if (arppacket->arpHdr.ar_hln != ETH_ALEN) { // HW Len
+		return;
+	}
+	if (arppacket->arpHdr.ar_pln != 4) { // Protocol Len
+		return;
+	}
+	if (arppacket->arpHdr.ar_op != htons(ARPOP_REQUEST)) { // Check it is a request
+		return;
+	}
+
+	// Copy the source mac into our destination
+    	memcpy(conn->peerEth, arppacket->ar_sha, ETH_ALEN);
+
+	// Could record the IP here, but we don't really care
+
+	// Put values in for the response
+	memcpy(&arpreply, packet, sizeof(ARPPacket));
+	memcpy(arpreply.ethHdr.h_source, conn->myEth, ETH_ALEN);
+	memcpy(arpreply.ethHdr.h_dest, conn->peerEth, ETH_ALEN);
+
+	memcpy(arpreply.ar_sha, conn->myEth, ETH_ALEN);
+	memcpy(arpreply.ar_tha, conn->peerEth, ETH_ALEN);
+	memcpy(arpreply.ar_sip, arppacket->ar_tip, 4);
+	memcpy(arpreply.ar_tip, arppacket->ar_sip, 4);
+	arpreply.arpHdr.ar_op = htons(ARPOP_REPLY);
+
+	if (Connection->debugFile) {
+		fprintf(Connection->debugFile, "Reply to ARP:-\n");
+		dumpHex(Connection->debugFile, (const unsigned char *) &arpreply, sizeof(ARPPacket));
+		fprintf(Connection->debugFile, "\n");
+		fflush(Connection->debugFile);
+	}
+	sendIPPacket(conn, sock, (EthPacket *) &arpreply, sizeof(ARPPacket));
+}
+
+void
+handleIPv4Packet(IPoEConnection *conn, int sock, EthPacket *ethpacket, int len, PPPoEConnection *pppoeconn, PPPoEPacket *pppoepacket)
+{
+    unsigned char *ipHdr;
+
+    ipHdr=ethpacket->payload;
+
+    /* Verify that it's IPv4 */
+    if ((ipHdr[0] & 0xF0) != 0x40) {
+	return;
+    }
+
+    if (isdhcp(ethpacket, len)) {
+	handleDHCPRequest(conn, sock, ethpacket, len, pppoeconn, pppoepacket);
+    } else {
+    	if (pppoeconn) {
+		pppoepacket->payload[0]=0x00;
+		pppoepacket->payload[1]=0x21;
+    		memcpy(pppoepacket->payload+2, ethpacket->payload, len);
+    		sendSessionPacket(pppoeconn, pppoepacket, len+2);
+    	}
+    }
+}
 int
 isdhcp(EthPacket *ethpacket, int len)
 {
@@ -143,7 +210,7 @@ addDHCPOption(unsigned char **p, unsigned char code, unsigned char *value, unsig
 #define MYNAME "modem"
 
 void
-handleDHCPRequest(IPoEConnection *conn, int sock, EthPacket *ethpacket, int len, PPPoEConnection *pppoeconn, PPPoEPacket *pppoepacket)
+handleDHCPRequest(IPoEConnection *ipoeconn, int sock, EthPacket *ethpacket, int len, PPPoEConnection *pppoeconn, PPPoEPacket *pppoepacket)
 {
     struct bootp_pkt *bootpreq;
     EthPacket ethreply;
@@ -180,7 +247,7 @@ handleDHCPRequest(IPoEConnection *conn, int sock, EthPacket *ethpacket, int len,
 	if (dhcp_message_type == DHCP_DISCOVER || dhcp_message_type == DHCP_REQUEST || dhcp_message_type == DHCP_FORCE_RENEW) {
 		memcpy(bootpreply, bootpreq, sizeof(struct bootp_pkt));
 		// Save the source hwaddr
-		memcpy(conn->peerEth, ethpacket->ethHdr.h_source, ETH_ALEN);
+		memcpy(ipoeconn->peerEth, ethpacket->ethHdr.h_source, ETH_ALEN);
 
 
 
@@ -192,8 +259,8 @@ handleDHCPRequest(IPoEConnection *conn, int sock, EthPacket *ethpacket, int len,
 		memcpy(&(bootpreply->xid), &(bootpreq->xid), 4);
 		bootpreply->flags=bootpreq->flags;
 		memset(&(bootpreply->client_ip), 0, 4);
-		memcpy(&(bootpreply->your_ip), &peerIP, sizeof(peerIP));
-		memcpy(&(bootpreply->server_ip), &gatewayIP, sizeof(gatewayIP));
+		memcpy(&(bootpreply->your_ip), &ipoeconn->peerIP, sizeof(ipoeconn->peerIP));
+		memcpy(&(bootpreply->server_ip), &ipoeconn->gatewayIP, sizeof(ipoeconn->gatewayIP));
 		memset(&(bootpreply->relay_ip), 0, 4);
 		memcpy(bootpreply->hw_addr, ethpacket->ethHdr.h_source, ETH_ALEN);
 		memset(bootpreply->serv_name, 0, sizeof(bootpreply->serv_name));
@@ -214,14 +281,14 @@ handleDHCPRequest(IPoEConnection *conn, int sock, EthPacket *ethpacket, int len,
 			addDHCPOption(&optptr, DHO_DHCP_MESSAGE_TYPE, buf, 1);
 		}
 
-		addDHCPOption(&optptr, DHO_DHCP_SERVER_IDENTIFIER, (unsigned char *) &gatewayIP, 4);
+		addDHCPOption(&optptr, DHO_DHCP_SERVER_IDENTIFIER, (unsigned char *) &ipoeconn->gatewayIP, 4);
 
 		tmpval=htonl(5*60);
 		addDHCPOption(&optptr, DHO_DHCP_LEASE_TIME, (unsigned char *) &tmpval, 4);
 
-		addDHCPOption(&optptr, DHO_SUBNET, (unsigned char *) &netmaskIP, 4);
+		addDHCPOption(&optptr, DHO_SUBNET, (unsigned char *) &ipoeconn->netmaskIP, 4);
 
-		addDHCPOption(&optptr, DHO_ROUTERS, (unsigned char *) &gatewayIP, 4);
+		addDHCPOption(&optptr, DHO_ROUTERS, (unsigned char *) &ipoeconn->gatewayIP, 4);
 
 		inet_pton(AF_INET, "8.8.8.8", buf);
 		addDHCPOption(&optptr, DHO_DOMAIN_NAME_SERVERS, buf, 4);
@@ -243,8 +310,8 @@ handleDHCPRequest(IPoEConnection *conn, int sock, EthPacket *ethpacket, int len,
 		bootpreply->iph.tos = 0;
 		bootpreply->iph.check = 0;
 		bootpreply->iph.tot_len = htons(udpreplylen + sizeof(bootpreply->iph));
-		memcpy(&(bootpreply->iph.daddr), &peerIP, sizeof(bootpreply->iph.daddr));
-		memcpy(&(bootpreply->iph.saddr), &gatewayIP, sizeof(bootpreply->iph.saddr));
+		memcpy(&(bootpreply->iph.daddr), &ipoeconn->peerIP, sizeof(bootpreply->iph.daddr));
+		memcpy(&(bootpreply->iph.saddr), &ipoeconn->gatewayIP, sizeof(bootpreply->iph.saddr));
 		bootpreply->iph.check = ip_checksum(&bootpreply->iph, sizeof(bootpreply->iph));
 		
 
@@ -254,14 +321,45 @@ handleDHCPRequest(IPoEConnection *conn, int sock, EthPacket *ethpacket, int len,
 		bootpreply->udph.dest=htons(68);
 
 		// Set the ethernet header
-		memcpy(ethreply.ethHdr.h_source, conn->myEth, ETH_ALEN);
+		memcpy(ethreply.ethHdr.h_source, ipoeconn->myEth, ETH_ALEN);
 		if (bootpreq->flags & 0x80) {
 			memset(ethreply.ethHdr.h_dest, 0xff, ETH_ALEN);
 		} else {
-			memcpy(ethreply.ethHdr.h_dest, conn->peerEth, ETH_ALEN);
+			memcpy(ethreply.ethHdr.h_dest, ipoeconn->peerEth, ETH_ALEN);
 		}
 		ethreply.ethHdr.h_proto = htons(ETH_P_IP);
 
-		sendIPPacket(conn, sock, &ethreply, udpreplylen + sizeof(bootpreply->iph) + sizeof(ethreply.ethHdr));
+		sendIPPacket(ipoeconn, sock, &ethreply, udpreplylen + sizeof(bootpreply->iph) + sizeof(ethreply.ethHdr));
 	}
 }
+
+/**********************************************************************
+*%FUNCTION: readIPFromEth
+*%ARGUMENTS:
+* conn -- IPoE connection info
+* pppoeconn -- PPPoE connection info
+* sock -- Ethernet socket
+* packet -- PPPoE packet
+*%RETURNS:
+* Nothing
+*%DESCRIPTION:
+* Reads a IP packet from the Ethernet interface and send it to PPPoE
+* device.
+***********************************************************************/
+void
+readIPFromEth(IPoEConnection *ipoeconn, int sock, PPPoEConnection *pppoeconn, PPPoEPacket *pppoepacket)
+{
+    EthPacket ethpacket;
+    int len;
+
+    if (receivePacket(sock, &ethpacket, &len) < 0) {
+	return;
+    }
+
+    if (ethpacket.ethHdr.h_proto == htons(ETH_P_ARP)) {
+	handleARPRequest(ipoeconn, sock, &ethpacket);
+    } else if (ethpacket.ethHdr.h_proto == htons(ETH_P_IP)) {
+	handleIPv4Packet(ipoeconn, sock, &ethpacket, len, pppoeconn, pppoepacket);
+    }
+}
+

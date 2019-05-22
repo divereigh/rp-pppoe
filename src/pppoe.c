@@ -14,7 +14,7 @@
 ***********************************************************************/
 
 #include "pppoe.h"
-#include "dhcp.h"
+#include "ipoe.h"
 
 #ifdef HAVE_SYSLOG_H
 #include <syslog.h>
@@ -68,10 +68,6 @@ int optFloodDiscovery    = 0;   /* Flood server with discovery requests.
 
 
 #define USE_CIDR 24
-
-struct in_addr peerIP;
-struct in_addr gatewayIP;
-struct in_addr netmaskIP;
 
 PPPoEConnection *Connection = NULL; /* Must be global -- used
 				       in signal handler */
@@ -446,9 +442,7 @@ main(int argc, char *argv[])
 
     /* Initialize connection info */
     memset(&ipoeconn, 0, sizeof(ipoeconn));
-    ipoeconn.discoverySocket = -1;
     ipoeconn.sessionSocket = -1;
-    ipoeconn.discoveryTimeout = PADI_TIMEOUT;
     IPoEConn = &ipoeconn;
 
     /* Initialize syslog */
@@ -762,36 +756,6 @@ rp_fatal(char const *str)
 }
 
 /**********************************************************************
-*%FUNCTION: readIPFromEth
-*%ARGUMENTS:
-* conn -- IPoE connection info
-* pppoeconn -- PPPoE connection info
-* sock -- Ethernet socket
-* packet -- PPPoE packet
-*%RETURNS:
-* Nothing
-*%DESCRIPTION:
-* Reads a IP packet from the Ethernet interface and send it to PPPoE
-* device.
-***********************************************************************/
-void
-readIPFromEth(IPoEConnection *ipoeconn, int sock, PPPoEConnection *pppoeconn, PPPoEPacket *pppoepacket)
-{
-    EthPacket ethpacket;
-    int len;
-
-    if (receivePacket(sock, &ethpacket, &len) < 0) {
-	return;
-    }
-
-    if (ethpacket.ethHdr.h_proto == htons(ETH_P_ARP)) {
-	handleARPRequest(ipoeconn, sock, &ethpacket);
-    } else if (ethpacket.ethHdr.h_proto == htons(ETH_P_IP)) {
-	handleIPv4Packet(ipoeconn, sock, &ethpacket, len, pppoeconn, pppoepacket);
-    }
-}
-
-/**********************************************************************
 *%FUNCTION: asyncReadFromEth
 *%ARGUMENTS:
 * conn -- PPPoE connection info
@@ -1081,81 +1045,11 @@ divertPPPoESessionData(IPoEConnection *ipoeconn, PPPoEPacket *packet)
 	if (packet->payload[6] != 0x03 || packet->payload[7] != 0x06) { // IP Address
 		return(0);
 	}
-	memcpy(&peerIP.s_addr, packet->payload + 8, sizeof(peerIP.s_addr));
-	netmaskIP.s_addr=htonl(~(0xffffffff >> USE_CIDR));
-	gatewayIP.s_addr=peerIP.s_addr & netmaskIP.s_addr;
-	gatewayIP.s_addr=htonl(ntohl(gatewayIP.s_addr)+1);
+	memcpy(&ipoeconn->peerIP.s_addr, packet->payload + 8, sizeof(ipoeconn->peerIP.s_addr));
+	ipoeconn->netmaskIP.s_addr=htonl(~(0xffffffff >> USE_CIDR));
+	ipoeconn->gatewayIP.s_addr=ipoeconn->peerIP.s_addr & ipoeconn->netmaskIP.s_addr;
+	ipoeconn->gatewayIP.s_addr=htonl(ntohl(ipoeconn->gatewayIP.s_addr)+1);
     }
     return(0);
 }
 
-void
-handleARPRequest(IPoEConnection *conn, int sock, EthPacket *packet)
-{
-	ARPPacket *arppacket=(ARPPacket *) packet;
-	ARPPacket arpreply;
-
-	if (arppacket->arpHdr.ar_hrd != htons(ARPHRD_ETHER)) { // Check it is ethernet
-		return;
-	}
-	if (arppacket->arpHdr.ar_pro != htons(ETH_P_IP)) { // Check it is IP
-		return;
-	}
-	if (arppacket->arpHdr.ar_hln != ETH_ALEN) { // HW Len
-		return;
-	}
-	if (arppacket->arpHdr.ar_pln != 4) { // Protocol Len
-		return;
-	}
-	if (arppacket->arpHdr.ar_op != htons(ARPOP_REQUEST)) { // Check it is a request
-		return;
-	}
-
-	// Copy the source mac into our destination
-    	memcpy(conn->peerEth, arppacket->ar_sha, ETH_ALEN);
-
-	// Could record the IP here, but we don't really care
-
-	// Put values in for the response
-	memcpy(&arpreply, packet, sizeof(ARPPacket));
-	memcpy(arpreply.ethHdr.h_source, conn->myEth, ETH_ALEN);
-	memcpy(arpreply.ethHdr.h_dest, conn->peerEth, ETH_ALEN);
-
-	memcpy(arpreply.ar_sha, conn->myEth, ETH_ALEN);
-	memcpy(arpreply.ar_tha, conn->peerEth, ETH_ALEN);
-	memcpy(arpreply.ar_sip, arppacket->ar_tip, 4);
-	memcpy(arpreply.ar_tip, arppacket->ar_sip, 4);
-	arpreply.arpHdr.ar_op = htons(ARPOP_REPLY);
-
-	if (Connection->debugFile) {
-		fprintf(Connection->debugFile, "Reply to ARP:-\n");
-		dumpHex(Connection->debugFile, (const unsigned char *) &arpreply, sizeof(ARPPacket));
-		fprintf(Connection->debugFile, "\n");
-		fflush(Connection->debugFile);
-	}
-	sendIPPacket(conn, sock, (EthPacket *) &arpreply, sizeof(ARPPacket));
-}
-
-void
-handleIPv4Packet(IPoEConnection *conn, int sock, EthPacket *ethpacket, int len, PPPoEConnection *pppoeconn, PPPoEPacket *pppoepacket)
-{
-    unsigned char *ipHdr;
-
-    ipHdr=ethpacket->payload;
-
-    /* Verify that it's IPv4 */
-    if ((ipHdr[0] & 0xF0) != 0x40) {
-	return;
-    }
-
-    if (isdhcp(ethpacket, len)) {
-	handleDHCPRequest(conn, sock, ethpacket, len, pppoeconn, pppoepacket);
-    } else {
-    	if (pppoeconn) {
-		pppoepacket->payload[0]=0x00;
-		pppoepacket->payload[1]=0x21;
-    		memcpy(pppoepacket->payload+2, ethpacket->payload, len);
-    		sendSessionPacket(pppoeconn, pppoepacket, len+2);
-    	}
-    }
-}
