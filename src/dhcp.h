@@ -164,5 +164,5 @@ struct dhcp_option
 #define DHCP_MAX_MTU		1500
 
 int isdhcp(EthPacket *ethpacket, int len);
-void handleDHCPRequest(PPPoEConnection *conn, int sock, EthPacket *ethpacket, int len, PPPoEConnection *pppoeconn, PPPoEPacket *pppoepacket);
+void handleDHCPRequest(IPoEConnection *conn, int sock, EthPacket *ethpacket, int len, PPPoEConnection *pppoeconn, PPPoEPacket *pppoepacket);
 #endif

@@ -323,6 +323,40 @@ typedef struct PPPoEConnectionStruct {
 #endif
 } PPPoEConnection;
 
+typedef struct IPoEConnectionStruct {
+    int discoveryState;		/* Where we are in discovery */
+    int discoverySocket;	/* Raw socket for discovery frames */
+    int sessionSocket;		/* Raw socket for session frames */
+    unsigned char myEth[ETH_ALEN]; /* My MAC address */
+    unsigned char peerEth[ETH_ALEN]; /* Peer's MAC address */
+#ifdef PLUGIN
+    unsigned char req_peer_mac[ETH_ALEN]; /* required peer MAC address */
+    unsigned char req_peer;     /* require mac addr to match req_peer_mac */
+#endif
+
+    UINT16_t session;		/* Session ID */
+    char *ifName;		/* Interface name */
+    char *serviceName;		/* Desired service name, if any */
+    char *acName;		/* Desired AC name, if any */
+    int synchronous;		/* Use synchronous PPP */
+    char *hostUniq;		/* Host-Uniq tag, if any */
+    int printACNames;		/* Just print AC names */
+    int skipDiscovery;		/* Skip discovery */
+    int noDiscoverySocket;	/* Don't even open discovery socket */
+    int killSession;		/* Kill session and exit */
+    FILE *debugFile;		/* Debug file for dumping packets */
+    int numPADOs;		/* Number of PADO packets received */
+    PPPoETag cookie;		/* We have to send this if we get it */
+    PPPoETag relayId;		/* Ditto */
+    int PADSHadError;           /* If PADS had an error tag */
+    int discoveryTimeout;       /* Timeout for discovery packets */
+#ifdef PLUGIN
+    int seenMaxPayload;
+    int mtu;
+    int mru;
+#endif
+} IPoEConnection;
+
 /* Structure used to determine acceptable PADO or PADS packet */
 struct PacketCriteria {
     PPPoEConnection *conn;
@@ -337,7 +371,7 @@ struct PacketCriteria {
 UINT16_t etherType(PPPoEPacket *packet);
 int openInterface(char const *ifname, UINT16_t type, unsigned char *hwaddr, UINT16_t *mtu);
 int sendPacket(PPPoEConnection *conn, int sock, PPPoEPacket *pkt, int size);
-int sendIPPacket(PPPoEConnection *conn, int sock, EthPacket *pkt, int size);
+int sendIPPacket(IPoEConnection *conn, int sock, EthPacket *pkt, int size);
 int receivePacket(int sock, EthPacket *pkt, int *size);
 int receiveIPPacket(int sock, EthPacket *pkt, int *size);
 void fatalSys(char const *str);
@@ -353,9 +387,9 @@ void parseLogErrs(UINT16_t typ, UINT16_t len, unsigned char *data, void *xtra);
 void pktLogErrs(char const *pkt, UINT16_t typ, UINT16_t len, unsigned char *data, void *xtra);
 void syncReadFromPPP(PPPoEConnection *conn, PPPoEPacket *packet);
 void asyncReadFromPPP(PPPoEConnection *conn, PPPoEPacket *packet);
-void asyncReadFromEth(PPPoEConnection *conn, int sock, int clampMss);
-void syncReadFromEth(PPPoEConnection *conn, int sock, int clampMss);
-void readIPFromEth(PPPoEConnection *conn, PPPoEConnection *pppoeconn, int sock, PPPoEPacket *packet);
+void asyncReadFromEth(PPPoEConnection *conn, int sock, IPoEConnection *ipoeconn, int clampMss);
+void syncReadFromEth(PPPoEConnection *conn, int sock, IPoEConnection *ipoeconn, int clampMss);
+void readIPFromEth(IPoEConnection *ipoeconn, int sock, PPPoEConnection *pppoeconn, PPPoEPacket *packet);
 char *strDup(char const *str);
 void sendPADT(PPPoEConnection *conn, char const *msg);
 void sendPADTf(PPPoEConnection *conn, char const *fmt, ...);
@@ -369,9 +403,9 @@ UINT16_t pppFCS16(UINT16_t fcs, unsigned char *cp, int len);
 void discovery(PPPoEConnection *conn);
 unsigned char *findTag(PPPoEPacket *packet, UINT16_t tagType,
 		       PPPoETag *tag);
-int grabSessionData(PPPoEConnection *conn, PPPoEPacket *packet);
-void handleARPRequest(PPPoEConnection *conn, int sock, EthPacket *packet);
-void handleIPv4Packet(PPPoEConnection *conn, int sock, EthPacket *ethpacket, int len, PPPoEConnection *pppoeconn, PPPoEPacket *pppoepacket);
+int divertPPPoESessionData(IPoEConnection *conn, PPPoEPacket *packet);
+void handleARPRequest(IPoEConnection *conn, int sock, EthPacket *packet);
+void handleIPv4Packet(IPoEConnection *conn, int sock, EthPacket *ethpacket, int len, PPPoEConnection *pppoeconn, PPPoEPacket *pppoepacket);
 
 #define SET_STRING(var, val) do { if (var) free(var); var = strDup(val); } while(0);
 

@@ -66,7 +66,6 @@ int optFloodDiscovery    = 0;   /* Flood server with discovery requests.
 				   USED FOR STRESS-TESTING ONLY.  DO NOT
 				   USE THE -F OPTION AGAINST A REAL ISP */
 
-PPPoEConnection IPoEConn;
 
 #define USE_CIDR 24
 
@@ -76,6 +75,7 @@ struct in_addr netmaskIP;
 
 PPPoEConnection *Connection = NULL; /* Must be global -- used
 				       in signal handler */
+IPoEConnection *IPoEConn = NULL;
 
 /***********************************************************************
 *%FUNCTION: sendSessionPacket
@@ -229,7 +229,7 @@ sessionDiscoveryPacket(PPPoEConnection *conn)
 * Handles the "session" phase of PPPoE
 ***********************************************************************/
 void
-session(PPPoEConnection *conn)
+session(PPPoEConnection *conn, IPoEConnection *ipoeconn)
 {
     fd_set readable;
     PPPoEPacket packet;
@@ -244,7 +244,7 @@ session(PPPoEConnection *conn)
     /* Prepare for select() */
     if (conn->sessionSocket > maxFD)   maxFD = conn->sessionSocket;
     if (conn->discoverySocket > maxFD) maxFD = conn->discoverySocket;
-    if (IPoEConn.sessionSocket > maxFD) maxFD = IPoEConn.sessionSocket;
+    if (ipoeconn->sessionSocket > maxFD) maxFD = ipoeconn->sessionSocket;
     maxFD++;
 
     /* Fill in the constant fields of the packet to save time */
@@ -262,9 +262,9 @@ session(PPPoEConnection *conn)
     /* check for buffered session data */
     while (BPF_BUFFER_HAS_DATA) {
 	if (conn->synchronous) {
-	    syncReadFromEth(conn, conn->sessionSocket, optClampMSS);
+	    syncReadFromEth(conn, conn->sessionSocket, ipoeconn, optClampMSS);
 	} else {
-	    asyncReadFromEth(conn, conn->sessionSocket, optClampMSS);
+	    asyncReadFromEth(conn, conn->sessionSocket, ipoeconn, optClampMSS);
 	}
     }
 #endif
@@ -281,7 +281,7 @@ session(PPPoEConnection *conn)
 	    FD_SET(conn->discoverySocket, &readable);
 	}
 	FD_SET(conn->sessionSocket, &readable);
-	FD_SET(IPoEConn.sessionSocket, &readable);
+	FD_SET(ipoeconn->sessionSocket, &readable);
 	while(1) {
 	    r = select(maxFD, &readable, NULL, NULL, tvp);
 	    if (r >= 0 || errno != EINTR) break;
@@ -308,15 +308,15 @@ session(PPPoEConnection *conn)
 	if (FD_ISSET(conn->sessionSocket, &readable)) {
 	    do {
 		if (conn->synchronous) {
-		    syncReadFromEth(conn, conn->sessionSocket, optClampMSS);
+		    syncReadFromEth(conn, conn->sessionSocket, ipoeconn, optClampMSS);
 		} else {
-		    asyncReadFromEth(conn, conn->sessionSocket, optClampMSS);
+		    asyncReadFromEth(conn, conn->sessionSocket, ipoeconn, optClampMSS);
 		}
 	    } while (BPF_BUFFER_HAS_DATA);
 	}
 
-	if (FD_ISSET(IPoEConn.sessionSocket, &readable)) {
-	    readIPFromEth(&IPoEConn, conn, IPoEConn.sessionSocket, &packet);
+	if (FD_ISSET(ipoeconn->sessionSocket, &readable)) {
+	    readIPFromEth(ipoeconn, ipoeconn->sessionSocket, conn, &packet);
 	}
 
 #ifndef USE_BPF
@@ -423,6 +423,7 @@ main(int argc, char *argv[])
     char const *options;
 
     PPPoEConnection conn;
+    IPoEConnection ipoeconn;
 
 #ifdef HAVE_N_HDLC
     int disc = N_HDLC;
@@ -443,13 +444,20 @@ main(int argc, char *argv[])
     /* For signal handler */
     Connection = &conn;
 
+    /* Initialize connection info */
+    memset(&ipoeconn, 0, sizeof(ipoeconn));
+    ipoeconn.discoverySocket = -1;
+    ipoeconn.sessionSocket = -1;
+    ipoeconn.discoveryTimeout = PADI_TIMEOUT;
+    IPoEConn = &ipoeconn;
+
     /* Initialize syslog */
     openlog("pppoe", LOG_PID, LOG_DAEMON);
 
 #ifdef DEBUGGING_ENABLED
-    options = "I:VAT:D:hS:C:UW:sm:np:e:kdf:F:t:";
+    options = "I:B:VAT:D:hS:C:UW:sm:np:e:kdf:F:t:";
 #else
-    options = "I:VAT:hS:C:UW:sm:np:e:kdf:F:t:";
+    options = "I:B:VAT:hS:C:UW:sm:np:e:kdf:F:t:";
 #endif
     while((opt = getopt(argc, argv, options)) != -1) {
 	switch(opt) {
@@ -591,7 +599,7 @@ main(int argc, char *argv[])
 	    SET_STRING(conn.ifName, optarg);
 	    break;
 	case 'B':
-	    SET_STRING(conn.ifName, optarg);
+	    SET_STRING(ipoeconn.ifName, optarg);
 	    break;
 	case 'V':
 	    printf("Roaring Penguin PPPoE Version %s\n", VERSION);
@@ -685,22 +693,15 @@ main(int argc, char *argv[])
 	exit(EXIT_SUCCESS);
     }
 
-    /* Initialize connection info */
-    memset(&IPoEConn, 0, sizeof(IPoEConn));
-    IPoEConn.discoverySocket = -1;
-    IPoEConn.sessionSocket = -1;
-    IPoEConn.discoveryTimeout = PADI_TIMEOUT;
-
-    IPoEConn.sessionSocket=openInterface("enp0s25.101", 0, IPoEConn.myEth, NULL);
-
-fprintf(conn.debugFile, "IPoEConn.sessionSocket=%d\n", IPoEConn.sessionSocket);
-fflush(conn.debugFile);
+    if (ipoeconn.ifName) {
+    	ipoeconn.sessionSocket=openInterface(ipoeconn.ifName, 0, ipoeconn.myEth, NULL);
+    }
 
     /* Set signal handlers: send PADT on HUP; ignore TERM and INT */
     signal(SIGTERM, SIG_IGN);
     signal(SIGINT, SIG_IGN);
     signal(SIGHUP, sigPADT);
-    session(&conn);
+    session(&conn, &ipoeconn);
     return 0;
 }
 
@@ -774,7 +775,7 @@ rp_fatal(char const *str)
 * device.
 ***********************************************************************/
 void
-readIPFromEth(PPPoEConnection *conn, PPPoEConnection *pppoeconn, int sock, PPPoEPacket *pppoepacket)
+readIPFromEth(IPoEConnection *ipoeconn, int sock, PPPoEConnection *pppoeconn, PPPoEPacket *pppoepacket)
 {
     EthPacket ethpacket;
     int len;
@@ -784,9 +785,9 @@ readIPFromEth(PPPoEConnection *conn, PPPoEConnection *pppoeconn, int sock, PPPoE
     }
 
     if (ethpacket.ethHdr.h_proto == htons(ETH_P_ARP)) {
-	handleARPRequest(conn, sock, &ethpacket);
+	handleARPRequest(ipoeconn, sock, &ethpacket);
     } else if (ethpacket.ethHdr.h_proto == htons(ETH_P_IP)) {
-	handleIPv4Packet(conn, sock, &ethpacket, len, pppoeconn, pppoepacket);
+	handleIPv4Packet(ipoeconn, sock, &ethpacket, len, pppoeconn, pppoepacket);
     }
 }
 
@@ -795,6 +796,7 @@ readIPFromEth(PPPoEConnection *conn, PPPoEConnection *pppoeconn, int sock, PPPoE
 *%ARGUMENTS:
 * conn -- PPPoE connection info
 * sock -- Ethernet socket
+* ipoeconn -- IPoE connection info
 * clampMss -- if non-zero, do MSS-clamping
 *%RETURNS:
 * Nothing
@@ -803,7 +805,7 @@ readIPFromEth(PPPoEConnection *conn, PPPoEConnection *pppoeconn, int sock, PPPoE
 * device.
 ***********************************************************************/
 void
-asyncReadFromEth(PPPoEConnection *conn, int sock, int clampMss)
+asyncReadFromEth(PPPoEConnection *conn, int sock, IPoEConnection *ipoeconn, int clampMss)
 {
     PPPoEPacket packet;
     int len;
@@ -918,7 +920,7 @@ asyncReadFromEth(PPPoEConnection *conn, int sock, int clampMss)
     }
     *ptr++ = FRAME_FLAG;
 
-    if (!grabSessionData(conn, &packet)) {
+    if (!divertPPPoESessionData(ipoeconn, &packet)) {
         /* Ship it out */
         if (write(1, pppBuf, (ptr-pppBuf)) < 0) {
     	    fatalSys("asyncReadFromEth: write");
@@ -931,6 +933,7 @@ asyncReadFromEth(PPPoEConnection *conn, int sock, int clampMss)
 *%ARGUMENTS:
 * conn -- PPPoE connection info
 * sock -- Ethernet socket
+* ipoeconn -- IPoE connection info
 * clampMss -- if true, clamp MSS.
 *%RETURNS:
 * Nothing
@@ -939,7 +942,7 @@ asyncReadFromEth(PPPoEConnection *conn, int sock, int clampMss)
 * device.
 ***********************************************************************/
 void
-syncReadFromEth(PPPoEConnection *conn, int sock, int clampMss)
+syncReadFromEth(PPPoEConnection *conn, int sock, IPoEConnection *ipoeconn, int clampMss)
 {
     PPPoEPacket packet;
     int len;
@@ -1018,7 +1021,7 @@ syncReadFromEth(PPPoEConnection *conn, int sock, int clampMss)
 	clampMSS(&packet, "incoming", clampMss);
     }
 
-    if (!grabSessionData(conn, &packet)) {
+    if (!divertPPPoESessionData(ipoeconn, &packet)) {
     	/* Ship it out */
     	vec[0].iov_base = (void *) dummy;
     	dummy[0] = FRAME_ADDR;
@@ -1033,15 +1036,20 @@ syncReadFromEth(PPPoEConnection *conn, int sock, int clampMss)
     }
 }
 
+/**********************************************************************
+*%FUNCTION: divertPPPoESessionData
+*%ARGUMENTS:
+* ipoeconn -- IPoE connection info
+* packet - packet received from PPPoE
+*%RETURNS:
+* true if packet has been diverted, false otherwise
+*%DESCRIPTION:
+* Checks if PPPoE packet should be diverted to IPoE
+***********************************************************************/
 int
-grabSessionData(PPPoEConnection *conn, PPPoEPacket *packet)
+divertPPPoESessionData(IPoEConnection *ipoeconn, PPPoEPacket *packet)
 {
-    // unsigned char *tcpHdr;
     unsigned char *ipHdr;
-    // unsigned char *opt;
-    // unsigned char *endHdr;
-    // unsigned char *mssopt = NULL;
-    // UINT16_t csum;
     EthPacket outpkt;
     UINT16_t protocoltype;
 
@@ -1058,17 +1066,12 @@ grabSessionData(PPPoEConnection *conn, PPPoEPacket *packet)
 	    return(0);
 	}
 
-	memcpy(outpkt.ethHdr.h_dest, IPoEConn.peerEth, ETH_ALEN);
-	memcpy(outpkt.ethHdr.h_source, IPoEConn.myEth, ETH_ALEN);
+	memcpy(outpkt.ethHdr.h_dest, ipoeconn->peerEth, ETH_ALEN);
+	memcpy(outpkt.ethHdr.h_source, ipoeconn->myEth, ETH_ALEN);
 	outpkt.ethHdr.h_proto = htons(ETH_P_IP);
 
 	memcpy(outpkt.payload, ipHdr, len-2);
-	sendIPPacket(&IPoEConn, IPoEConn.sessionSocket, &outpkt, len + sizeof(struct ethhdr));
-	if (conn->debugFile) {
-	    dumpHex(conn->debugFile, ipHdr, len-2);
-	    fprintf(conn->debugFile, "\n");
-	    fflush(conn->debugFile);
-	}
+	sendIPPacket(ipoeconn, ipoeconn->sessionSocket, &outpkt, len + sizeof(struct ethhdr));
 	return(1);
     } else if (protocoltype == htons(PPPIPCP)) {
 	// Look for an ACK from upstream for the IP address
@@ -1087,7 +1090,7 @@ grabSessionData(PPPoEConnection *conn, PPPoEPacket *packet)
 }
 
 void
-handleARPRequest(PPPoEConnection *conn, int sock, EthPacket *packet)
+handleARPRequest(IPoEConnection *conn, int sock, EthPacket *packet)
 {
 	ARPPacket *arppacket=(ARPPacket *) packet;
 	ARPPacket arpreply;
@@ -1134,7 +1137,7 @@ handleARPRequest(PPPoEConnection *conn, int sock, EthPacket *packet)
 }
 
 void
-handleIPv4Packet(PPPoEConnection *conn, int sock, EthPacket *ethpacket, int len, PPPoEConnection *pppoeconn, PPPoEPacket *pppoepacket)
+handleIPv4Packet(IPoEConnection *conn, int sock, EthPacket *ethpacket, int len, PPPoEConnection *pppoeconn, PPPoEPacket *pppoepacket)
 {
     unsigned char *ipHdr;
 
@@ -1146,10 +1149,6 @@ handleIPv4Packet(PPPoEConnection *conn, int sock, EthPacket *ethpacket, int len,
     }
 
     if (isdhcp(ethpacket, len)) {
-	fprintf(stderr, "Bootp:-\n");
-	dumpHex(stderr, (const unsigned char *) &ethpacket, len);
-	fprintf(stderr, "\n");
-	fflush(stderr);
 	handleDHCPRequest(conn, sock, ethpacket, len, pppoeconn, pppoepacket);
     } else {
     	if (pppoeconn) {

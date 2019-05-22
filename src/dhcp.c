@@ -143,7 +143,7 @@ addDHCPOption(unsigned char **p, unsigned char code, unsigned char *value, unsig
 #define MYNAME "modem"
 
 void
-handleDHCPRequest(PPPoEConnection *conn, int sock, EthPacket *ethpacket, int len, PPPoEConnection *pppoeconn, PPPoEPacket *pppoepacket)
+handleDHCPRequest(IPoEConnection *conn, int sock, EthPacket *ethpacket, int len, PPPoEConnection *pppoeconn, PPPoEPacket *pppoepacket)
 {
     struct bootp_pkt *bootpreq;
     EthPacket ethreply;

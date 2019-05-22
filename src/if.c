@@ -607,7 +607,7 @@ sendPacket(PPPoEConnection *conn, int sock, PPPoEPacket *pkt, int size)
 * Transmits a packet
 ***********************************************************************/
 int
-sendIPPacket(PPPoEConnection *conn, int sock, EthPacket *pkt, int size)
+sendIPPacket(IPoEConnection *conn, int sock, EthPacket *pkt, int size)
 {
 #if defined(USE_BPF)
     if (write(sock, pkt, size) < 0) {
