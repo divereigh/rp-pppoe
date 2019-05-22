@@ -88,8 +88,10 @@ int unpackDHCPOptions(unsigned char *options, int maxlen)
 	int count=0;
 	unsigned char *p;
 
+	/*
 	fprintf(stderr, "Options:-\n");
 	dumpHex(stderr, options, maxlen);
+	*/
 	memset(dhcpoptlist, 0, sizeof(struct dhcp_option) * 256);
 	p=options;
 	for (n=0; n<255 && len<maxlen; n++) {
@@ -100,10 +102,10 @@ int unpackDHCPOptions(unsigned char *options, int maxlen)
 			}
 			dhcpoptlist[n].length=*(p+1);
 			dhcpoptlist[n].value=p+2;
-			fprintf(stderr, "dhcp option: %d len=%d\n", dhcpoptlist[n].code, dhcpoptlist[n].length);
-			dumpHex(stderr, dhcpoptlist[n].value, dhcpoptlist[n].length);
-			fprintf(stderr, "\n");
-			fflush(stderr);
+			//fprintf(stderr, "dhcp option: %d len=%d\n", dhcpoptlist[n].code, dhcpoptlist[n].length);
+			//dumpHex(stderr, dhcpoptlist[n].value, dhcpoptlist[n].length);
+			//fprintf(stderr, "\n");
+			//fflush(stderr);
 			len += dhcpoptlist[n].length+2;
 			p+=dhcpoptlist[n].length+2;
 			count++;
@@ -138,8 +140,6 @@ addDHCPOption(unsigned char **p, unsigned char code, unsigned char *value, unsig
 	**p=255; // Put terminator on the end
 }
 
-#define MYIP "10.10.10.1"
-#define YOURIP "10.10.10.2"
 #define MYNAME "modem"
 
 void
@@ -243,8 +243,8 @@ handleDHCPRequest(PPPoEConnection *conn, int sock, EthPacket *ethpacket, int len
 		bootpreply->iph.tos = 0;
 		bootpreply->iph.check = 0;
 		bootpreply->iph.tot_len = htons(udpreplylen + sizeof(bootpreply->iph));
-		inet_pton(AF_INET, YOURIP, &(bootpreply->iph.daddr));
-		inet_pton(AF_INET, MYIP, &(bootpreply->iph.saddr));
+		memcpy(&(bootpreply->iph.daddr), &peerIP, sizeof(bootpreply->iph.daddr));
+		memcpy(&(bootpreply->iph.saddr), &gatewayIP, sizeof(bootpreply->iph.saddr));
 		bootpreply->iph.check = ip_checksum(&bootpreply->iph, sizeof(bootpreply->iph));
 		
 

@@ -376,6 +376,7 @@ usage(char const *argv0)
     fprintf(stderr, "   -D filename    -- Log debugging information in filename.\n");
 #endif
     fprintf(stderr,
+	    "   -B if_name     -- Interface to bridge IP session packets.\n"
 	    "   -T timeout     -- Specify inactivity timeout in seconds.\n"
 	    "   -t timeout     -- Initial timeout for discovery packets in seconds\n"
 	    "   -V             -- Print version and exit.\n"
@@ -587,6 +588,9 @@ main(int argc, char *argv[])
 	    }
 	    break;
 	case 'I':
+	    SET_STRING(conn.ifName, optarg);
+	    break;
+	case 'B':
 	    SET_STRING(conn.ifName, optarg);
 	    break;
 	case 'V':
