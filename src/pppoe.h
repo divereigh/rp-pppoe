@@ -324,7 +324,7 @@ typedef struct PPPoEConnectionStruct {
 } PPPoEConnection;
 
 typedef struct IPoEConnectionStruct {
-    int discoveryState;		/* Where we are in discovery */
+    int active;			/* Are we active */
     int sessionSocket;		/* Raw socket for session frames */
     unsigned char myEth[ETH_ALEN]; /* My MAC address */
     unsigned char peerEth[ETH_ALEN]; /* Peer's MAC address */

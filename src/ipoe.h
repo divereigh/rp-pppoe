@@ -168,4 +168,5 @@ void handleDHCPRequest(IPoEConnection *conn, int sock, EthPacket *ethpacket, int
 void handleARPRequest(IPoEConnection *conn, int sock, EthPacket *packet);
 void handleIPv4Packet(IPoEConnection *conn, int sock, EthPacket *ethpacket, int len, PPPoEConnection *pppoeconn, PPPoEPacket *pppoepacket);
 void readIPFromEth(IPoEConnection *ipoeconn, int sock, PPPoEConnection *pppoeconn, PPPoEPacket *packet);
+int checkIPDest(IPoEConnection *ipoeconn, struct iphdr *ipHdr);
 #endif

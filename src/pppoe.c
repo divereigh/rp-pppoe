@@ -1013,7 +1013,7 @@ syncReadFromEth(PPPoEConnection *conn, int sock, IPoEConnection *ipoeconn, int c
 int
 divertPPPoESessionData(IPoEConnection *ipoeconn, PPPoEPacket *packet)
 {
-    unsigned char *ipHdr;
+    struct iphdr *ipHdr;
     EthPacket outpkt;
     UINT16_t protocoltype;
 
@@ -1021,22 +1021,18 @@ divertPPPoESessionData(IPoEConnection *ipoeconn, PPPoEPacket *packet)
 
     len = (int) ntohs(packet->length);
     memcpy(&protocoltype, packet->payload, 2);
-    ipHdr=packet->payload+2;
     /* check PPP protocol type */
     if (protocoltype == htons(PPPIP)) {
-
-	/* Verify once more that it's IPv4 */
-	if ((ipHdr[0] & 0xF0) != 0x40) {
-	    return(0);
+    	ipHdr=(struct iphdr *) (packet->payload+2);
+	if (checkIPDest(ipoeconn, ipHdr)) {
+		memcpy(outpkt.ethHdr.h_dest, ipoeconn->peerEth, ETH_ALEN);
+		memcpy(outpkt.ethHdr.h_source, ipoeconn->myEth, ETH_ALEN);
+		outpkt.ethHdr.h_proto = htons(ETH_P_IP);
+	
+		memcpy(outpkt.payload, packet->payload+2, len-2);
+		sendIPPacket(ipoeconn, ipoeconn->sessionSocket, &outpkt, len-2 + sizeof(struct ethhdr));
+		return(1);
 	}
-
-	memcpy(outpkt.ethHdr.h_dest, ipoeconn->peerEth, ETH_ALEN);
-	memcpy(outpkt.ethHdr.h_source, ipoeconn->myEth, ETH_ALEN);
-	outpkt.ethHdr.h_proto = htons(ETH_P_IP);
-
-	memcpy(outpkt.payload, ipHdr, len-2);
-	sendIPPacket(ipoeconn, ipoeconn->sessionSocket, &outpkt, len + sizeof(struct ethhdr));
-	return(1);
     } else if (protocoltype == htons(PPPIPCP)) {
 	// Look for an ACK from upstream for the IP address
 	if (packet->payload[2] != 0x02) { // Config ACK
@@ -1049,6 +1045,7 @@ divertPPPoESessionData(IPoEConnection *ipoeconn, PPPoEPacket *packet)
 	ipoeconn->netmaskIP.s_addr=htonl(~(0xffffffff >> USE_CIDR));
 	ipoeconn->gatewayIP.s_addr=ipoeconn->peerIP.s_addr & ipoeconn->netmaskIP.s_addr;
 	ipoeconn->gatewayIP.s_addr=htonl(ntohl(ipoeconn->gatewayIP.s_addr)+1);
+	ipoeconn->active=1;
     }
     return(0);
 }

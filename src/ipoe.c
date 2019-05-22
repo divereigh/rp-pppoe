@@ -2,12 +2,16 @@
 
 #include <arpa/inet.h>
 #include <string.h>
+#include <time.h>
 
 /*
 ** bootp relay code
 */
 
 extern PPPoEConnection *Connection;
+
+#define ARP_TIMEOUT 30
+#define DHCP_LEASE_LEN 120
 
 uint16_t ip_checksum(void* vdata,size_t length) {
     // Cast the data pointer to one that can be indexed.
@@ -41,7 +45,33 @@ uint16_t ip_checksum(void* vdata,size_t length) {
 }
 
 void
-handleARPRequest(IPoEConnection *conn, int sock, EthPacket *packet)
+sendARPRequest(IPoEConnection *conn)
+{
+	ARPPacket arprequest;
+
+	memset(&arprequest, 0, sizeof(ARPPacket));
+	memcpy(arprequest.ethHdr.h_source, conn->myEth, ETH_ALEN);
+	memset(arprequest.ethHdr.h_dest, 0xff, ETH_ALEN);
+	arprequest.ethHdr.h_proto=htons(ETH_P_ARP);
+
+	arprequest.arpHdr.ar_hrd=htons(ARPHRD_ETHER);			// Ethernet
+	arprequest.arpHdr.ar_pro=htons(ETH_P_IP);			// IPv4
+	arprequest.arpHdr.ar_hln=ETH_ALEN;				// HW Len
+	arprequest.arpHdr.ar_pln=4;					// Protocol Len
+	arprequest.arpHdr.ar_op=htons(ARPOP_REQUEST);			// ARP Request
+	memcpy(arprequest.ar_sha, conn->myEth, ETH_ALEN);	// My HW Address
+	memcpy(arprequest.ar_sip, &(conn->gatewayIP), 4);
+	memcpy(arprequest.ar_tip, &(conn->peerIP), 4);
+
+	//fprintf(stderr, "ARP Request:-\n");
+	//dumpHex(stderr, (const unsigned char *) &arprequest, sizeof(ARPPacket));
+	//fprintf(stderr, "\n");
+	//fflush(stderr);
+	sendIPPacket(conn, conn->sessionSocket, (EthPacket *) &arprequest, sizeof(ARPPacket));
+}
+
+void
+handleARPPacket(IPoEConnection *conn, int sock, EthPacket *packet)
 {
 	ARPPacket *arppacket=(ARPPacket *) packet;
 	ARPPacket arpreply;
@@ -58,33 +88,40 @@ handleARPRequest(IPoEConnection *conn, int sock, EthPacket *packet)
 	if (arppacket->arpHdr.ar_pln != 4) { // Protocol Len
 		return;
 	}
-	if (arppacket->arpHdr.ar_op != htons(ARPOP_REQUEST)) { // Check it is a request
-		return;
+	if (arppacket->arpHdr.ar_op == htons(ARPOP_REQUEST)) { // Request - send reply
+		//fprintf(stderr, "ARP Request received:-\n");
+		//dumpHex(stderr, (const unsigned char *) &arppacket, sizeof(ARPPacket));
+		//fprintf(stderr, "\n");
+		//fflush(stderr);
+		// Copy the source mac into our destination
+		memcpy(conn->peerEth, arppacket->ar_sha, ETH_ALEN);
+		time(&conn->lastarp);
+
+		// Could record the IP here, but we don't really care
+
+		// Put values in for the response
+		memcpy(&arpreply, packet, sizeof(ARPPacket));
+		memcpy(arpreply.ethHdr.h_source, conn->myEth, ETH_ALEN);
+		memcpy(arpreply.ethHdr.h_dest, conn->peerEth, ETH_ALEN);
+
+		memcpy(arpreply.ar_sha, conn->myEth, ETH_ALEN);
+		memcpy(arpreply.ar_tha, conn->peerEth, ETH_ALEN);
+		memcpy(arpreply.ar_sip, arppacket->ar_tip, 4);
+		memcpy(arpreply.ar_tip, arppacket->ar_sip, 4);
+		arpreply.arpHdr.ar_op = htons(ARPOP_REPLY);
+
+		sendIPPacket(conn, sock, (EthPacket *) &arpreply, sizeof(ARPPacket));
+	} else if (arppacket->arpHdr.ar_op == htons(ARPOP_REPLY)) {
+		// fprintf(stderr, "ARP Reply received:-\n");
+		// dumpHex(stderr, (const unsigned char *) &arppacket, sizeof(ARPPacket));
+		// fprintf(stderr, "\n");
+		// fflush(stderr);
+		// Check it is a reply for the address we care about
+		if (memcmp(arppacket->ar_sip, &(conn->peerIP), 4)==0) {
+			memcpy(conn->peerEth, arppacket->ar_tip, ETH_ALEN);
+			time(&conn->lastarp);
+		}
 	}
-
-	// Copy the source mac into our destination
-    	memcpy(conn->peerEth, arppacket->ar_sha, ETH_ALEN);
-
-	// Could record the IP here, but we don't really care
-
-	// Put values in for the response
-	memcpy(&arpreply, packet, sizeof(ARPPacket));
-	memcpy(arpreply.ethHdr.h_source, conn->myEth, ETH_ALEN);
-	memcpy(arpreply.ethHdr.h_dest, conn->peerEth, ETH_ALEN);
-
-	memcpy(arpreply.ar_sha, conn->myEth, ETH_ALEN);
-	memcpy(arpreply.ar_tha, conn->peerEth, ETH_ALEN);
-	memcpy(arpreply.ar_sip, arppacket->ar_tip, 4);
-	memcpy(arpreply.ar_tip, arppacket->ar_sip, 4);
-	arpreply.arpHdr.ar_op = htons(ARPOP_REPLY);
-
-	if (Connection->debugFile) {
-		fprintf(Connection->debugFile, "Reply to ARP:-\n");
-		dumpHex(Connection->debugFile, (const unsigned char *) &arpreply, sizeof(ARPPacket));
-		fprintf(Connection->debugFile, "\n");
-		fflush(Connection->debugFile);
-	}
-	sendIPPacket(conn, sock, (EthPacket *) &arpreply, sizeof(ARPPacket));
 }
 
 void
@@ -227,15 +264,6 @@ handleDHCPRequest(IPoEConnection *ipoeconn, int sock, EthPacket *ethpacket, int 
     bootpreq = (struct bootp_pkt *) ethpacket->payload;
     bootpreply = (struct bootp_pkt *) ethreply.payload;
 
-    // set relay IP
-//    inet_pton(AF_INET, "10.10.10.2", &(bootpreq->relay_ip));
-//    inet_pton(AF_INET, "10.10.10.2", &(bootpreq->iph.saddr));
-//    inet_pton(AF_INET, "10.10.10.1", &(bootpreq->iph.daddr));
-//    pppoepacket->payload[0]=0x00;
-//    pppoepacket->payload[1]=0x21;
-//    memcpy(pppoepacket->payload+2, ethpacket->payload, len);
-//    sendSessionPacket(pppoeconn, pppoepacket, len+2);
-
 	// Calculate length of options section (incl DHCP Cookie)
 	req_opt_len=ntohs(bootpreq->udph.uh_ulen) -
 		((unsigned char *) (&bootpreply->exten) - (unsigned char *) (&bootpreply->udph));
@@ -279,11 +307,12 @@ handleDHCPRequest(IPoEConnection *ipoeconn, int sock, EthPacket *ethpacket, int 
 		} else if (dhcp_message_type == DHCP_REQUEST || dhcp_message_type == DHCP_FORCE_RENEW) {
 			buf[0]=DHCP_ACK;
 			addDHCPOption(&optptr, DHO_DHCP_MESSAGE_TYPE, buf, 1);
+			time(&ipoeconn->lastdhcp);
 		}
 
 		addDHCPOption(&optptr, DHO_DHCP_SERVER_IDENTIFIER, (unsigned char *) &ipoeconn->gatewayIP, 4);
 
-		tmpval=htonl(5*60);
+		tmpval=htonl(DHCP_LEASE_LEN);
 		addDHCPOption(&optptr, DHO_DHCP_LEASE_TIME, (unsigned char *) &tmpval, 4);
 
 		addDHCPOption(&optptr, DHO_SUBNET, (unsigned char *) &ipoeconn->netmaskIP, 4);
@@ -330,6 +359,9 @@ handleDHCPRequest(IPoEConnection *ipoeconn, int sock, EthPacket *ethpacket, int 
 		ethreply.ethHdr.h_proto = htons(ETH_P_IP);
 
 		sendIPPacket(ipoeconn, sock, &ethreply, udpreplylen + sizeof(bootpreply->iph) + sizeof(ethreply.ethHdr));
+	} else if (dhcp_message_type == DHCP_RELEASE) {
+		// Zap the lease
+		ipoeconn->lastdhcp=0;
 	}
 }
 
@@ -356,10 +388,59 @@ readIPFromEth(IPoEConnection *ipoeconn, int sock, PPPoEConnection *pppoeconn, PP
 	return;
     }
 
-    if (ethpacket.ethHdr.h_proto == htons(ETH_P_ARP)) {
-	handleARPRequest(ipoeconn, sock, &ethpacket);
-    } else if (ethpacket.ethHdr.h_proto == htons(ETH_P_IP)) {
-	handleIPv4Packet(ipoeconn, sock, &ethpacket, len, pppoeconn, pppoepacket);
+    /* Only listen on lan port if we are "active" */
+    if (ipoeconn->active) {
+	    if (ethpacket.ethHdr.h_proto == htons(ETH_P_ARP)) {
+		handleARPPacket(ipoeconn, sock, &ethpacket);
+	    } else if (ethpacket.ethHdr.h_proto == htons(ETH_P_IP)) {
+		handleIPv4Packet(ipoeconn, sock, &ethpacket, len, pppoeconn, pppoepacket);
+	    }
     }
 }
+
+int
+checkIPDest(IPoEConnection *ipoeconn, struct iphdr *ipHdr)
+{
+	time_t now;
+	/* Check our connection is active (has an IP etc) */
+	if (!ipoeconn->active) {
+		// fprintf(stderr, "IPoE not active\n");
+		return(0);
+	}
+
+	/* Check it is IPv4 */
+	if (ipHdr->version != 4) {
+		// fprintf(stderr, "Not IPv4 version: %x\n", ipHdr->version);
+	    	return(0);
+	}
+
+	/* Check it is for the right dest IP */
+	if (memcmp(&ipHdr->daddr, &ipoeconn->peerIP, sizeof(ipHdr->daddr)) != 0) {
+		// fprintf(stderr, "Not right dest IP\n");
+		return(0);
+	}
+
+	time(&now);
+	/* Check there is a valid DHCP Lease - then ignore ARP */
+	if (ipoeconn->lastdhcp+DHCP_LEASE_LEN > now) {
+		// fprintf(stderr, "got lease\n");
+		return(1);
+	}
+
+	/* Check the ARP has been refreshed in last ARP_TIMEOUT-5 secs */
+	if (ipoeconn->lastarp+ARP_TIMEOUT-5 < now) {
+		/* Send arp request */
+		// fprintf(stderr, "arp timeout sending\n");
+		sendARPRequest(ipoeconn);
+	}
+
+	/* Check the ARP has been refreshed in last ARP_TIMEOUT secs */
+	if (ipoeconn->lastarp+ARP_TIMEOUT < now) {
+		// fprintf(stderr, "No arp (yet)\n");
+		return(0);
+	}
+
+	return(1);
+}
+
 
